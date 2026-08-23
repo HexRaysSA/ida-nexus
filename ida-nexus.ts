@@ -30,6 +30,7 @@ const CALL_TIMEOUT_MS = 2_147_483_647;
 const STDERR_CAPTURE_MAX_CHARS = 1024 * 1024;
 const STATUS_WIDGET_KEY = "ida-nexus:status-bar";
 const STATUS_HIDE_DELAY_MS = 4000;
+const DISCOVERABLE_TOOLS_FLAG = "ida-tools-discoverable";
 
 type PiContent =
   | { type: "text"; text: string }
@@ -87,6 +88,15 @@ function renderToolCall(
 
 export default function idaNexus(pi: ExtensionAPI) {
   const agentKind = "arktype" in pi && "zod" in pi ? "omp" : "pi";
+  if (agentKind === "omp") {
+    pi.registerFlag(DISCOVERABLE_TOOLS_FLAG, {
+      description:
+        "Mount IDA tools under xd:// instead of exposing them directly in OMP",
+      type: "boolean",
+      default: false,
+    });
+  }
+
   const sessionPathField = `${agentKind}_session_path`;
   let client: Client | undefined;
   let connectingClient: Client | undefined;
@@ -233,11 +243,21 @@ export default function idaNexus(pi: ExtensionAPI) {
       }
       client = next;
       connectingClient = undefined;
+      const ompToolOptions =
+        agentKind === "omp"
+          ? {
+              loadMode:
+                pi.getFlag(DISCOVERABLE_TOOLS_FLAG) === true
+                  ? ("discoverable" as const)
+                  : ("essential" as const),
+            }
+          : {};
       for (const tool of tools) {
         const piToolName = tool.name.startsWith("ida_")
           ? tool.name
           : `ida_${tool.name}`;
         pi.registerTool({
+          ...ompToolOptions,
           name: piToolName,
           label: tool.annotations?.title ?? `IDA ${tool.name}`,
           description: tool.description ?? `Call the IDA MCP ${tool.name} tool`,
