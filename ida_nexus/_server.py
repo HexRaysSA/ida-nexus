@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_LEASE_GRACE_SECONDS = 20.0
 DEFAULT_SSE_HEARTBEAT_SECONDS = 5.0
 MAX_KEEPALIVE_SECONDS = 3600.0
+_AUTOANALYSIS_SCHEDULER_YIELD_SECONDS = 0.001
 
 
 @dataclass
@@ -44,6 +45,8 @@ class NexusBackend(Protocol):
     def cancel_active(self) -> None: ...
 
     def release_session(self, lease_id: str) -> None: ...
+
+    def advance_autoanalysis(self) -> dict[str, Any]: ...
 
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]: ...
 
@@ -95,6 +98,7 @@ class NexusHTTPServer:
         self._httpd: LocalHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._watchdog: threading.Thread | None = None
+        self._analysis_thread: threading.Thread | None = None
         self._registration: InstanceRegistration | None = None
         self._entry: DatabaseInstance | None = None
         self._draining = False
@@ -105,6 +109,10 @@ class NexusHTTPServer:
         self._leases: dict[str, _Lease] = {}
         self._shutdown_at: float | None = time.monotonic() + self.lease_grace
         self._backend_lock = threading.Lock()
+        # Foreground operations announce their intent before contending for the
+        # backend lock. The analysis scheduler then yields deterministically
+        # instead of relying on threading.Lock fairness.
+        self._foreground_waiters = 0
         self._running_lease_id: str | None = None
         self._running_operation_id: str | None = None
         self._pending_operations: set[tuple[str | None, str]] = set()
@@ -185,6 +193,74 @@ class NexusHTTPServer:
         except Exception:
             logger.exception("Nexus HTTP server stopped unexpectedly")
 
+    def start_autoanalysis(self) -> None:
+        """Start initial analysis after publication without blocking discovery.
+
+        Bounded slices use the same backend serialization and hook-driven
+        completion path as every other operation, but release the operation lock
+        between slices. Low-level clients can therefore execute during analysis;
+        policy layers such as the MCP may still explicitly wait first.
+        """
+
+        with self._lock:
+            if self._httpd is None:
+                raise RuntimeError("Nexus server must be started before autoanalysis")
+            if self.analysis_state.snapshot()["status"] == "complete":
+                return
+            if self._analysis_thread is not None:
+                return
+            thread = threading.Thread(
+                target=self._run_startup_autoanalysis,
+                name="ida-nexus-autoanalysis",
+                daemon=True,
+            )
+            self._analysis_thread = thread
+        thread.start()
+
+    def _acquire_startup_analysis(self) -> bool:
+        """Acquire the backend only when no foreground operation is queued."""
+
+        while not self._stream_stop.is_set():
+            with self._activity:
+                if self._draining or self._shutdown_requested:
+                    return False
+                if self._foreground_waiters == 0 and self._backend_lock.acquire(
+                    blocking=False
+                ):
+                    return True
+            if self._stream_stop.wait(_AUTOANALYSIS_SCHEDULER_YIELD_SECONDS):
+                return False
+        return False
+
+    def _run_startup_autoanalysis(self) -> None:
+        try:
+            while self._acquire_startup_analysis():
+                try:
+                    # Shutdown may begin while this thread is waiting for the
+                    # backend. Never start a fresh slice after that boundary.
+                    with self._activity:
+                        if (
+                            self._stream_stop.is_set()
+                            or self._draining
+                            or self._shutdown_requested
+                        ):
+                            return
+                    if self.analysis_state.complete.is_set():
+                        return
+                    status = self.backend.advance_autoanalysis()
+                finally:
+                    self._backend_lock.release()
+                if status["complete"]:
+                    return
+                # Let newly arriving request threads register as foreground
+                # waiters before considering the next background slice.
+                if self._stream_stop.wait(_AUTOANALYSIS_SCHEDULER_YIELD_SECONDS):
+                    return
+        except APIError as exc:
+            logger.warning("Nexus startup autoanalysis stopped: %s", exc)
+        except Exception:
+            logger.exception("Nexus startup autoanalysis failed")
+
     def release_registration(self) -> None:
         """Withdraw ownership after the owning IDB has detached or closed."""
 
@@ -208,6 +284,7 @@ class NexusHTTPServer:
             httpd = self._httpd
             thread = self._thread
             watchdog = self._watchdog
+            analysis_thread = self._analysis_thread
             self._httpd = None
             self._thread = None
             self._watchdog = None
@@ -225,6 +302,13 @@ class NexusHTTPServer:
             and watchdog is not threading.current_thread()
         ):
             watchdog.join(timeout=2.0)
+        if (
+            analysis_thread is not None
+            and analysis_thread.is_alive()
+            and analysis_thread is not threading.current_thread()
+        ):
+            # Database teardown must not race a scheduler still using IDA.
+            analysis_thread.join()
 
     def _watch_leases(self) -> None:
         while not self._stream_stop.is_set():
@@ -349,8 +433,8 @@ class NexusHTTPServer:
         operation_id: str | None = None,
     ) -> Any:
         operation_key = (lease_id, operation_id) if operation_id is not None else None
-        if operation_key is not None:
-            with self._activity:
+        with self._activity:
+            if operation_key is not None:
                 if operation_key in self._pending_operations:
                     raise APIError(
                         "duplicate_operation",
@@ -358,18 +442,26 @@ class NexusHTTPServer:
                         status=409,
                     )
                 self._pending_operations.add(operation_key)
+            # Publish foreground intent atomically with the operation key so
+            # the background scheduler cannot slip into the backend first.
+            self._foreground_waiters += 1
         try:
-            if operation_key is None:
-                self._backend_lock.acquire()
-            else:
-                while not self._backend_lock.acquire(timeout=0.05):
-                    with self._activity:
-                        if operation_key in self._cancelled_operations:
-                            raise APIError(
-                                "operation_cancelled",
-                                "The operation was cancelled",
-                                status=409,
-                            )
+            try:
+                if operation_key is None:
+                    self._backend_lock.acquire()
+                else:
+                    while not self._backend_lock.acquire(timeout=0.05):
+                        with self._activity:
+                            if operation_key in self._cancelled_operations:
+                                raise APIError(
+                                    "operation_cancelled",
+                                    "The operation was cancelled",
+                                    status=409,
+                                )
+            finally:
+                with self._activity:
+                    self._foreground_waiters -= 1
+                    self._activity.notify_all()
             try:
                 with self._activity:
                     if lease_id is not None and lease_id not in self._leases:

@@ -166,6 +166,12 @@ with DatabaseHandle.open("firmware.bin", options=options) as handle:
 
 IDA import settings in `DatabaseOpenOptions` apply only when Nexus imports a
 new source file. They do not reconfigure a reused GUI, worker, or existing IDB.
+For a newly spawned worker, `auto_analysis=True` starts sliced analysis
+after the worker is published. Low-level `execute_python()` calls can run
+between slices, while `wait_autoanalysis()` explicitly drains the same lifecycle.
+The MCP intentionally waits before model-authored execution.
+A persistently disabled GUI reports an immediately usable `disabled` analysis
+status without confusing IDA's temporary suspension during GUI actions.
 `execute_python()` is stateless by default; pass `persist_globals=True` to keep
 a lease-scoped Python namespace between calls.
 

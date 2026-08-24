@@ -8,12 +8,52 @@ import pytest
 
 import ida_nexus._runtime as runtime_module
 from ida_nexus._runtime import (
+    AnalysisState,
     IDARuntime,
     IdbChangeState,
     PythonExecutionResult,
     _execute_user_code,
     create_idb_change_hook,
+    reconcile_autoanalysis_state,
 )
+
+
+def test_analysis_state_can_settle_disabled_then_finish_analysis() -> None:
+    state = AnalysisState()
+    callbacks: list[str] = []
+    state.add_completion_callback(lambda: callbacks.append("ready"))
+
+    state.mark_complete("disabled")
+    assert state.snapshot() == {"status": "disabled", "complete": True}
+    assert callbacks == ["ready"]
+
+    state.mark_complete()
+    assert state.snapshot() == {"status": "complete", "complete": True}
+    assert callbacks == ["ready"]
+
+
+def test_reconcile_uses_persistent_disable_not_runtime_disable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = AnalysisState()
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_auto",
+        SimpleNamespace(auto_is_ok=lambda: False, is_auto_enabled=lambda: False),
+    )
+    fake_ida = SimpleNamespace(inf_is_auto_enabled=lambda: True)
+    monkeypatch.setitem(sys.modules, "ida_ida", fake_ida)
+
+    assert reconcile_autoanalysis_state(
+        state,
+        disabled_is_complete=True,
+    ) == {"status": "running", "complete": False}
+
+    fake_ida.inf_is_auto_enabled = lambda: False
+    assert reconcile_autoanalysis_state(
+        state,
+        disabled_is_complete=True,
+    ) == {"status": "disabled", "complete": True}
 
 
 def test_idb_change_state_delivers_one_event_at_a_time() -> None:
@@ -121,6 +161,100 @@ def _inline_runtime(monkeypatch: pytest.MonkeyPatch) -> IDARuntime:
 
     monkeypatch.setattr(runtime, "_run_sync", run_inline)
     return runtime
+
+
+def test_autoanalysis_slices_release_before_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    runtime.analysis_state = AnalysisState()
+    steps = iter((True, False))
+    calls: list[object] = []
+
+    def enable_auto(enabled: bool) -> bool:
+        calls.append(("enable", enabled))
+        return False
+
+    def auto_make_step(start: int, end: int) -> bool:
+        calls.append(("step", start, end))
+        return next(steps)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_auto",
+        SimpleNamespace(
+            enable_auto=enable_auto,
+            auto_make_step=auto_make_step,
+            auto_is_ok=lambda: True,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "ida_idaapi", SimpleNamespace(BADADDR=-1))
+
+    assert runtime.advance_autoanalysis(max_steps=1, max_seconds=1) == {
+        "status": "running",
+        "complete": False,
+    }
+    assert runtime.advance_autoanalysis(max_steps=1, max_seconds=1) == {
+        "status": "complete",
+        "complete": True,
+    }
+    assert calls == [
+        ("enable", True),
+        ("step", 0, -1),
+        ("enable", False),
+        ("enable", True),
+        ("step", 0, -1),
+        ("enable", False),
+    ]
+
+
+def test_explicit_wait_advances_disabled_barrier_to_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    runtime.analysis_state = AnalysisState()
+    runtime.analysis_state.mark_complete("disabled")
+    calls: list[object] = []
+
+    def enable_auto(enabled: bool) -> bool:
+        calls.append(("enable", enabled))
+        return False
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_auto",
+        SimpleNamespace(
+            enable_auto=enable_auto,
+            auto_wait=lambda: calls.append(("wait",)) or True,
+            auto_is_ok=lambda: True,
+        ),
+    )
+
+    assert runtime.wait_autoanalysis(None) == {
+        "status": "complete",
+        "complete": True,
+    }
+    assert calls == [("enable", True), ("wait",), ("enable", False)]
+
+
+def test_cancelled_explicit_wait_does_not_accept_disabled_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    runtime.analysis_state = AnalysisState()
+    runtime.analysis_state.mark_complete("disabled")
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_auto",
+        SimpleNamespace(
+            enable_auto=lambda _enabled: False,
+            auto_wait=lambda: False,
+            auto_is_ok=lambda: False,
+        ),
+    )
+
+    with pytest.raises(runtime_module.APIError, match="cancelled"):
+        runtime.wait_autoanalysis(None)
 
 
 def test_execution_operation_metadata_is_scoped_to_hook(

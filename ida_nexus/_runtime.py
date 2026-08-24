@@ -23,6 +23,8 @@ from .models import DatabaseChangeEvent, PythonExecutionResult
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
 USER_CODE_FILENAME = "<ida-nexus>"
+AUTOANALYSIS_SLICE_SECONDS = 0.02
+AUTOANALYSIS_SLICE_STEPS = 256
 
 
 class APIError(RuntimeError):
@@ -45,17 +47,29 @@ class CodeValidationError(ValueError):
 
 
 class AnalysisState:
-    """Thread-safe status for initial autoanalysis."""
+    """Thread-safe status for the initial-autoanalysis barrier."""
 
     def __init__(self) -> None:
         self.complete = threading.Event()
         self._completion_lock = threading.Lock()
         self._completion_callbacks: list[Callable[[], object]] = []
+        self._status = "running"
 
-    def mark_complete(self) -> None:
+    def mark_complete(self, status: str = "complete") -> None:
+        """Settle the barrier as analyzed or intentionally disabled.
+
+        A later explicit wait may advance ``disabled`` to ``complete``. Completion
+        callbacks still run exactly once, when the barrier first becomes usable.
+        """
+
+        if status not in {"complete", "disabled"}:
+            raise ValueError("analysis completion status must be complete or disabled")
         with self._completion_lock:
             if self.complete.is_set():
+                if self._status == "disabled" and status == "complete":
+                    self._status = status
                 return
+            self._status = status
             self.complete.set()
             callbacks = tuple(self._completion_callbacks)
             self._completion_callbacks.clear()
@@ -73,11 +87,34 @@ class AnalysisState:
             callback()
 
     def snapshot(self) -> dict[str, Any]:
-        complete = self.complete.is_set()
-        return {
-            "status": "complete" if complete else "running",
-            "complete": complete,
-        }
+        with self._completion_lock:
+            complete = self.complete.is_set()
+            status = self._status
+        return {"status": status, "complete": complete}
+
+
+def reconcile_autoanalysis_state(
+    analysis_state: AnalysisState,
+    *,
+    disabled_is_complete: bool = False,
+) -> dict[str, Any]:
+    """Reconcile hook-driven state with IDA's current main-thread state.
+
+    GUI actions temporarily suspend the runtime autoanalyzer, so only IDA's
+    persistent user-facing flag may classify analysis as intentionally disabled.
+    Workers leave a disabled analyzer pending for an explicit/background wait.
+    """
+
+    import ida_auto
+
+    if ida_auto.auto_is_ok():
+        analysis_state.mark_complete()
+    elif disabled_is_complete:
+        import ida_ida
+
+        if not ida_ida.inf_is_auto_enabled():
+            analysis_state.mark_complete("disabled")
+    return analysis_state.snapshot()
 
 
 class _OperationInterrupt(BaseException):
@@ -799,11 +836,51 @@ class IDARuntime:
             batch=False,
         )
 
+    def advance_autoanalysis(
+        self,
+        *,
+        max_steps: int = AUTOANALYSIS_SLICE_STEPS,
+        max_seconds: float = AUTOANALYSIS_SLICE_SECONDS,
+    ) -> dict[str, Any]:
+        """Advance initial analysis for one bounded, interleavable slice."""
+
+        import ida_auto
+        import ida_idaapi
+
+        if self.analysis_state.snapshot()["status"] == "complete":
+            return self.analysis_state.snapshot()
+        if max_steps <= 0 or not math.isfinite(max_seconds) or max_seconds <= 0:
+            raise ValueError("autoanalysis slice limits must be positive")
+
+        def advance() -> bool:
+            previously_enabled = ida_auto.enable_auto(True)
+            try:
+                deadline = time.monotonic() + max_seconds
+                for _ in range(max_steps):
+                    if not ida_auto.auto_make_step(0, ida_idaapi.BADADDR):
+                        return True
+                    if time.monotonic() >= deadline:
+                        break
+                return False
+            finally:
+                if not previously_enabled:
+                    ida_auto.enable_auto(False)
+
+        completed = self._run_sync(
+            advance,
+            kind="analysis_slice",
+            timeout=None,
+        )
+        if completed and ida_auto.auto_is_ok():
+            self.analysis_state.mark_complete()
+        return self.analysis_state.snapshot()
+
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]:
         import ida_auto
 
-        if self.analysis_state.complete.is_set():
-            return self.analysis_state.snapshot()
+        initial_status = self.analysis_state.snapshot()
+        if initial_status["complete"] and initial_status["status"] == "complete":
+            return initial_status
 
         def wait() -> bool:
             previously_enabled = ida_auto.enable_auto(True)
@@ -818,7 +895,7 @@ class IDARuntime:
 
         completed = self._run_sync(wait, kind="analysis", timeout=timeout)
         status = self.analysis_state.snapshot()
-        if not completed and not status["complete"]:
+        if not completed and status["status"] != "complete":
             raise APIError(
                 "analysis_cancelled",
                 "Autoanalysis was cancelled before completion",

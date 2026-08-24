@@ -145,6 +145,13 @@ disk permanently to avoid split-inode locking races.
 7. Wait for a record with the expected IDB key and launch identity. Normally the
    PID is sufficient; on Windows the console launcher can hand off to a Python
    child, so the random record suffix is authoritative across both processes.
+8. By default, start initial autoanalysis asynchronously only after
+   publication. idalib's native `run_auto_analysis=True` path blocks
+   database opening, so Nexus opens with it deferred and advances bounded
+   analysis slices from a server-owned thread. Each slice uses the normal IDA
+   operation dispatcher and then releases it, allowing low-level clients to
+   execute between slices. The MCP deliberately still waits on the completion
+   barrier before its first execution.
 
 Public `DatabaseOpenOptions` exposes the complete `IdaCommandOptions` import
 surface to managed workers: analysis mode, image base, fresh/output database,
@@ -157,10 +164,13 @@ paragraph-based `-b` value.
 
 An explicit output database resolves by that IDB identity rather than attaching
 to a GUI that merely has the same executable open. A fresh-database request
-never reuses a live owner. All launch options are spawn/import-only and cannot
-reconfigure a reused instance. When a worker reopens an existing IDB, Nexus
+never reuses a live owner. Launch options cannot reconfigure a reused live
+instance. When a worker reopens an existing IDB, Nexus
 drops source-import options instead of passing invalid loader switches to IDA.
-These controls belong to `DatabaseOpenOptions`, not the six-tool MCP surface.
+The worker-level `auto_analysis` policy is preserved because it controls whether
+analysis starts asynchronously after publication rather than configuring the
+loader. These controls belong to `DatabaseOpenOptions`, not the six-tool MCP
+surface.
 
 The spawn lock is held until the child becomes ready or fails. Startup waiting
 checks `Popen.poll()` without mistaking a successful Windows launcher handoff
@@ -211,7 +221,12 @@ usage and warn when explicitly bound beyond loopback. Stdio is the normal MCP
 transport.
 
 `IDARuntime` serializes operations and dispatches them through
-`ida_kernwin.execute_sync`. The current ida-domain `Database` is available
+`ida_kernwin.execute_sync`. Worker background autoanalysis uses bounded
+`auto_make_step()` slices, releasing that serialization point between slices;
+this mirrors the GUI's idle-driven analysis and preserves the low-level API's
+ability to execute while initial analysis is still running. An explicit
+`wait_autoanalysis()` remains a blocking drain, and the MCP intentionally uses
+that barrier before model-authored execution. The current ida-domain `Database` is available
 globally as `db`, alongside the imported `ida_domain` package. Ordinary
 statements execute once, and a single or trailing expression becomes the
 result. As an alternative, code without a trailing
@@ -223,14 +238,14 @@ poisoning the next operation.
 
 ## Protocol contract and versioning
 
-`PROTOCOL_VERSION` is currently `6`. It is an exact compatibility version for
+`PROTOCOL_VERSION` is currently `7`. It is an exact compatibility version for
 the private discovery registry and per-database HTTP API. There is no downgrade
 or highest-common-version negotiation: a scanner whose local version differs
 from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
 deliberate—starting a replacement could corrupt an IDB already owned by a peer
 that the scanner does not understand.
 
-Protocol version 6 consists of the following interoperable contracts.
+Protocol version 7 consists of the following interoperable contracts.
 
 ### Discovery contract
 
@@ -271,16 +286,17 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `POST /shutdown_database` | `{lease_id, save}`; the active lease must be exclusive and own a managed idalib worker. Success is `{"ok":true,"result":{"shutting_down":true,"save":bool}}`, after which teardown uses `Database.close(save=save)`. |
-| `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object; observing it never enables or advances analysis. |
-| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts optional `timeout`, `lease_id`, and `operation_id` fields. An omitted timeout waits without a deadline. |
+| `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object; observing it never enables or advances analysis. `status` is `running`, `complete`, or `disabled`. A persistently disabled GUI settles the barrier as `disabled` with `complete: true`; temporary GUI-action suspension does not. |
+| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts optional `timeout`, `lease_id`, and `operation_id` fields. An omitted timeout waits without a deadline. An explicit wait advances a `disabled` barrier by temporarily enabling the runtime analyzer without changing the persistent GUI setting. |
 
 Request-owned cancellation requires registry protocol version 3. Version 4 adds
 opt-in lease-scoped persistent Python namespaces. Version 5 requires execution
 results to be directly JSON-serializable and adds exclusive managed-worker
 shutdown. Version 6 reports when explicit lease release commits final managed
-shutdown. This prevents a new client from silently attaching to a GUI plugin or
-worker that cannot provide the lifecycle and execution semantics on which it
-relies.
+shutdown. Version 7 distinguishes a persistently disabled GUI autoanalyzer from
+temporary runtime suspension. These exact versions prevent a new client from
+silently attaching to a GUI plugin or worker that cannot provide the lifecycle
+and execution semantics on which it relies.
 
 Operation failures use a non-2xx status and, once application dispatch has
 begun, `{"ok":false,"error":{"code":...,"message":...}}`; additional error

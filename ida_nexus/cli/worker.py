@@ -18,6 +18,7 @@ from .._runtime import (
     IDARuntime,
     IdbChangeState,
     create_autoanalysis_hook,
+    reconcile_autoanalysis_state,
 )
 from .._server import DEFAULT_LEASE_GRACE_SECONDS, NexusHTTPServer
 
@@ -60,8 +61,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--auto-analysis",
-        action="store_true",
-        help="Enable IDA autoanalysis while opening the database",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Start IDA autoanalysis in the background after publishing the worker",
     )
     parser.add_argument(
         "--image-base",
@@ -174,7 +176,10 @@ def _build_ida_options(args: argparse.Namespace, options_type: Any) -> Any:
     """Translate byte-oriented worker arguments into ``IdaCommandOptions``."""
 
     return options_type(
-        auto_analysis=args.auto_analysis,
+        # idalib's run_auto_analysis=True blocks Database.open() until analysis
+        # finishes. Always defer there so Nexus can publish first; the worker
+        # starts the same wait operation asynchronously after registration.
+        auto_analysis=False,
         loading_address=_image_base_to_paragraphs(args.image_base),
         new_database=args.new_database,
         compiler=args.compiler,
@@ -259,7 +264,6 @@ def main(argv: list[str] | None = None) -> int:
     # available and records initialization failures in the worker log.
     probe()
 
-    import ida_auto
     import ida_kernwin
     import ida_loader
     import ida_nalt
@@ -300,8 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         # Create and install Python hooks only after that cycle has completed.
         analysis_hook = create_autoanalysis_hook(analysis_state)
         analysis_hook.hook()
-        if ida_auto.auto_is_ok():
-            analysis_state.mark_complete()
+        reconcile_autoanalysis_state(analysis_state)
 
         idb_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB) or ""
         exe_path = ida_nalt.get_input_file_path() or str(input_path)
@@ -329,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
             on_shutdown=kernwin.stop_serving,
         )
         server.start()
+        if args.auto_analysis:
+            server.start_autoanalysis()
         print(f"[ida-nexus] {server.url}", flush=True)
 
         # In IDA 9.4+, serve() dispatches execute_sync requests from HTTP

@@ -685,7 +685,12 @@ class DatabaseHandle:
         )
 
     def poll_autoanalysis(self) -> AnalysisResult:
-        """Return initial autoanalysis status without enabling or advancing it."""
+        """Return status without itself enabling or advancing autoanalysis.
+
+        A GUI whose persistent analysis setting is off reports ``disabled`` and
+        a settled barrier; workers may already be advancing analysis in the
+        background after publication.
+        """
         result = self._request(
             "/poll_autoanalysis",
             {},
@@ -703,7 +708,11 @@ class DatabaseHandle:
         *,
         operation_id: str | None = None,
     ) -> AnalysisResult:
-        """Wait for initial autoanalysis through the public Nexus route."""
+        """Wait for initial autoanalysis through the public Nexus route.
+
+        This also explicitly analyzes a GUI barrier previously settled as
+        ``disabled``, while restoring the prior temporary runtime state afterward.
+        """
         payload: dict[str, Any] = {}
         if timeout is not None:
             payload["timeout"] = timeout

@@ -17,15 +17,18 @@ class DatabaseOpenOptions:
     """Attachment policy and spawn-only IDA import options.
 
     IDA import options configure only a newly spawned worker. They cannot
-    reconfigure a reused GUI database or worker. ``image_base`` is a byte
-    address and must be 16-byte aligned.
+    reconfigure a reused GUI database or worker. ``auto_analysis`` controls
+    whether that worker starts analysis asynchronously after publication
+    (the default); an explicit ``wait_autoanalysis()`` can start it later
+    either way.
+    ``image_base`` is a byte address and must be 16-byte aligned.
     """
 
     spawn: bool = True
     startup_timeout: float = 120.0
     output_database: str | Path | None = None
     keepalive: float = 0.0
-    auto_analysis: bool = False
+    auto_analysis: bool = True
     image_base: int | None = None
     new_database: bool = False
     compiler: str | None = None

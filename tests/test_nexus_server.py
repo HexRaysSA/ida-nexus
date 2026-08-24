@@ -50,6 +50,11 @@ class RecordingBackend:
     def release_session(self, lease_id: str) -> None:
         del lease_id
 
+    def advance_autoanalysis(self):
+        self.calls.append(("advance",))
+        self.analysis.mark_complete()
+        return self.analysis.snapshot()
+
     def wait_autoanalysis(self, timeout: float | None):
         self.calls.append(("wait", timeout))
         self.analysis.mark_complete()
@@ -146,6 +151,238 @@ def make_server(tmp_path: Path, *, gui: bool = False):
     )
     server.start()
     return server, backend
+
+
+def test_server_starts_autoanalysis_once_after_publication(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    try:
+        server.start_autoanalysis()
+        server.start_autoanalysis()
+        assert backend.analysis.complete.wait(1.0)
+        analysis_thread = server._analysis_thread
+        assert analysis_thread is not None
+        analysis_thread.join(timeout=1.0)
+        assert backend.calls.count(("advance",)) == 1
+        assert ("wait", None) not in backend.calls
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_background_autoanalysis_prioritizes_operations_without_reserving_ids(
+    tmp_path: Path,
+):
+    class SlicedBackend(RecordingBackend):
+        def __init__(self, analysis: AnalysisState) -> None:
+            super().__init__(analysis)
+            self.first_slice = threading.Event()
+            self.release_first_slice = threading.Event()
+            self.slice_count = 0
+
+        def advance_autoanalysis(self):
+            self.slice_count += 1
+            self.calls.append(("advance", self.slice_count))
+            if self.slice_count == 1:
+                self.first_slice.set()
+                assert self.release_first_slice.wait(1.0)
+            else:
+                self.analysis.mark_complete()
+            return self.analysis.snapshot()
+
+    analysis = AnalysisState()
+    backend = SlicedBackend(analysis)
+    server = NexusHTTPServer(
+        backend,
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        analysis,
+        tmp_path,
+        token="test-token",
+    )
+    server.start()
+    result: list[tuple[int, object, object]] = []
+    try:
+        server.start_autoanalysis()
+        assert backend.first_slice.wait(1.0)
+
+        def execute_during_analysis() -> None:
+            result.append(
+                request(
+                    server,
+                    "POST",
+                    "/execute_python",
+                    {
+                        "code": "during",
+                        "operation_id": "__ida_nexus_startup_autoanalysis__",
+                    },
+                )
+            )
+
+        execution = threading.Thread(target=execute_during_analysis, daemon=True)
+        execution.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with server._activity:
+                if (
+                    None,
+                    "__ida_nexus_startup_autoanalysis__",
+                ) in server._pending_operations:
+                    break
+            time.sleep(0.001)
+        else:  # pragma: no cover
+            raise AssertionError("execution did not queue behind analysis slice")
+
+        backend.release_first_slice.set()
+        execution.join(timeout=1.0)
+        assert not execution.is_alive()
+        assert analysis.complete.wait(1.0)
+        assert result[0][0] == 200
+        assert backend.calls[:3] == [
+            ("advance", 1),
+            (
+                "execute_python",
+                "during",
+                None,
+                None,
+                "__ida_nexus_startup_autoanalysis__",
+                None,
+                False,
+            ),
+            ("advance", 2),
+        ]
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_explicit_wait_takes_over_from_sliced_autoanalysis(tmp_path: Path):
+    class TakeoverBackend(RecordingBackend):
+        def __init__(self, analysis: AnalysisState) -> None:
+            super().__init__(analysis)
+            self.slice_started = threading.Event()
+            self.release_slice = threading.Event()
+
+        def advance_autoanalysis(self):
+            self.calls.append(("advance",))
+            self.slice_started.set()
+            assert self.release_slice.wait(1.0)
+            return self.analysis.snapshot()
+
+    analysis = AnalysisState()
+    backend = TakeoverBackend(analysis)
+    server = NexusHTTPServer(
+        backend,
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        analysis,
+        tmp_path,
+        token="test-token",
+    )
+    server.start()
+    result: list[tuple[int, object, object]] = []
+    try:
+        server.start_autoanalysis()
+        assert backend.slice_started.wait(1.0)
+
+        waiter = threading.Thread(
+            target=lambda: result.append(
+                request(
+                    server,
+                    "POST",
+                    "/wait_autoanalysis",
+                    {"operation_id": "mcp-wait"},
+                )
+            ),
+            daemon=True,
+        )
+        waiter.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with server._activity:
+                if (None, "mcp-wait") in server._pending_operations:
+                    break
+            time.sleep(0.001)
+        else:  # pragma: no cover
+            raise AssertionError("explicit wait did not queue behind analysis slice")
+
+        backend.release_slice.set()
+        waiter.join(timeout=1.0)
+        assert not waiter.is_alive()
+        assert result[0][0] == 200
+        analysis_thread = server._analysis_thread
+        assert analysis_thread is not None
+        analysis_thread.join(timeout=1.0)
+        assert not analysis_thread.is_alive()
+        assert backend.calls == [("advance",), ("wait", None)]
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_stop_prevents_waiting_autoanalysis_slice_from_starting(tmp_path: Path):
+    analysis = AnalysisState()
+    backend = RecordingBackend(analysis)
+    server = NexusHTTPServer(
+        backend,
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        analysis,
+        tmp_path,
+        token="test-token",
+    )
+    server.start()
+    foreground_started = threading.Event()
+    release_foreground = threading.Event()
+
+    def hold_backend() -> None:
+        foreground_started.set()
+        assert release_foreground.wait(1.0)
+
+    foreground = threading.Thread(
+        target=lambda: server._run_operation(None, hold_backend, "foreground"),
+        daemon=True,
+    )
+    stopper = threading.Thread(target=server.stop, daemon=True)
+    try:
+        foreground.start()
+        assert foreground_started.wait(1.0)
+        server.start_autoanalysis()
+        analysis_thread = server._analysis_thread
+        assert analysis_thread is not None
+        assert analysis_thread.is_alive()
+
+        stopper.start()
+        assert server._stream_stop.wait(1.0)
+        release_foreground.set()
+        foreground.join(timeout=1.0)
+        stopper.join(timeout=1.0)
+
+        assert not foreground.is_alive()
+        assert not stopper.is_alive()
+        assert not analysis_thread.is_alive()
+        assert ("advance",) not in backend.calls
+    finally:
+        release_foreground.set()
+        if foreground.ident is not None:
+            foreground.join(timeout=1.0)
+        if stopper.ident is not None:
+            stopper.join(timeout=1.0)
+        server.stop()
+        server.release_registration()
+
+
+def test_autoanalysis_requires_published_server(tmp_path: Path):
+    analysis = AnalysisState()
+    server = NexusHTTPServer(
+        RecordingBackend(analysis),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        analysis,
+        tmp_path,
+    )
+
+    try:
+        server.start_autoanalysis()
+    except RuntimeError as exc:
+        assert "must be started" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("analysis started before server publication")
 
 
 def test_http_handler_workers_are_prewarmed_and_stopped(tmp_path: Path):

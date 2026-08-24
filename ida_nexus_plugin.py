@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import ida_auto
 import ida_kernwin
 import ida_loader
 import ida_nalt
@@ -15,6 +14,7 @@ from ida_nexus._runtime import (
     IDARuntime,
     IdbChangeState,
     create_autoanalysis_hook,
+    reconcile_autoanalysis_state,
 )
 from ida_nexus._server import NexusHTTPServer
 
@@ -29,8 +29,12 @@ class ReadyToRunHook(ida_kernwin.UI_Hooks):
             self.plugin.start_server()
         except Exception as exc:  # noqa: BLE001 -- IDA startup may raise SWIG errors
             ida_kernwin.msg(f"[ida-nexus] failed to start: {exc}\n")
-        finally:
-            self.unhook()
+
+    def postprocess_action(self) -> None:
+        # IDA has restored the runtime analyzer from the persistent IDB setting
+        # by this point. Reconcile explicit disable actions and queue-draining
+        # scripts that did not emit auto_empty_finally.
+        self.plugin.reconcile_autoanalysis()
 
 
 class NexusPlugin(idaapi.plugin_t):
@@ -86,11 +90,17 @@ class NexusPlugin(idaapi.plugin_t):
             str(Path(exe_path).resolve()) if exe_path else "",
         )
 
+    def reconcile_autoanalysis(self) -> None:
+        if not self.analysis_state.complete.is_set():
+            reconcile_autoanalysis_state(
+                self.analysis_state,
+                disabled_is_complete=True,
+            )
+
     def start_server(self) -> None:
         if self._server is not None:
             return
-        if ida_auto.auto_is_ok():
-            self.analysis_state.mark_complete()
+        self.reconcile_autoanalysis()
 
         idb_path, exe_path = self._current_paths()
 

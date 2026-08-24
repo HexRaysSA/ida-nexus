@@ -81,6 +81,9 @@ class StaticBackend:
     def release_session(self, lease_id: str) -> None:
         del lease_id
 
+    def advance_autoanalysis(self):
+        return {"status": "complete", "complete": True}
+
     def wait_autoanalysis(self, timeout: float | None):
         return {"status": "complete", "complete": True}
 
@@ -293,6 +296,16 @@ def test_resolver_timeout_is_shared_across_registry_probes(
 
     # The timeout is one budget for the whole scan, not one budget per record.
     assert time.monotonic() - started < 0.15
+
+
+def test_worker_autoanalysis_starts_by_default() -> None:
+    assert DatabaseOpenOptions().auto_analysis is True
+    assert resolver_mod.WorkerLaunchOptions().auto_analysis is True
+    assert worker_parser().parse_args(["sample.bin"]).auto_analysis is True
+    assert (
+        worker_parser().parse_args(["sample.bin", "--no-auto-analysis"]).auto_analysis
+        is False
+    )
 
 
 def test_database_handle_forwards_import_options(monkeypatch) -> None:
@@ -1279,8 +1292,9 @@ def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
             handle_closed.set()
 
     @classmethod
-    def slow_open(cls, path: str, **_kwargs) -> SlowHandle:
+    def slow_open(cls, path: str, **kwargs) -> SlowHandle:
         assert path.endswith("/tmp/test")
+        assert kwargs["options"].auto_analysis is True
         open_started.set()
         assert finish_open.wait(2)
         return SlowHandle()
@@ -1557,6 +1571,7 @@ def test_existing_idb_drops_source_import_options(tmp_path: Path) -> None:
         str(expected_idb),
         7.5,
         resolver_mod.WorkerLaunchOptions(
+            auto_analysis=True,
             image_base=0x8000,
             processor="arm",
             file_type="Raw",
@@ -1566,6 +1581,7 @@ def test_existing_idb_drops_source_import_options(tmp_path: Path) -> None:
     )
 
     assert command[:3] == ["ida-nexus", "worker", str(expected_idb)]
+    assert "--auto-analysis" in command
     assert "--image-base" not in command
     assert "--processor" not in command
     assert "--file-type" not in command
@@ -1645,7 +1661,8 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
     parsed = worker_parser().parse_args(command[2:])
     ida_options = _build_ida_options(parsed, lambda **kwargs: kwargs)
     assert ida_options == {
-        "auto_analysis": True,
+        # The worker publishes before starting analysis through Nexus.
+        "auto_analysis": False,
         "loading_address": 0x800,
         "new_database": True,
         "compiler": "gcc:sysv",

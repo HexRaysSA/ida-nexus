@@ -221,6 +221,9 @@ class DatabaseManager:
                     options=DatabaseOpenOptions(
                         startup_timeout=self._open_timeout,
                         keepalive=self._keepalive,
+                        # Publish the worker first, then start analysis through
+                        # its normal Nexus operation and hook lifecycle.
+                        auto_analysis=True,
                     ),
                 )
                 if not handle.connected:

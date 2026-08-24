@@ -33,7 +33,7 @@ from .paths import _find_console_script
 class WorkerLaunchOptions:
     """IDA import options used only when a new idalib worker is spawned."""
 
-    auto_analysis: bool = False
+    auto_analysis: bool = True
     image_base: int | None = None
     new_database: bool = False
     compiler: str | None = None
@@ -183,7 +183,9 @@ def _build_worker_command(
         # again can make IDA terminate with a fatal error (for example, -b may
         # be used only while loading a new file), so an existing database is
         # reopened without source-import configuration.
-        options = WorkerLaunchOptions()
+        # Autoanalysis is a worker lifecycle policy, not a source-import
+        # option baked into the IDB. Preserve it while dropping loader flags.
+        options = WorkerLaunchOptions(auto_analysis=options.auto_analysis)
     command = [
         *launcher,
         input_path,
@@ -197,6 +199,8 @@ def _build_worker_command(
         command.extend(["--output-database", expected_idb])
     if options.auto_analysis:
         command.append("--auto-analysis")
+    else:
+        command.append("--no-auto-analysis")
     if options.image_base is not None:
         command.extend(["--image-base", hex(options.image_base)])
     if options.new_database:
@@ -411,7 +415,7 @@ def resolve_instance(
     timeout: float = 120.0,
     lease_grace: float = 20.0,
     output_database: str | os.PathLike[str] | None = None,
-    auto_analysis: bool = False,
+    auto_analysis: bool = True,
     image_base: int | None = None,
     new_database: bool = False,
     compiler: str | None = None,
