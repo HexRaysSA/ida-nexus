@@ -68,7 +68,6 @@ Configure a regular stdio MCP server in your MCP JSON configuration:
     "ida": {
       "command": "uvx",
       "args": [
-        "--with=ida-hcli",
         "ida-nexus",
         "mcp",
         "--agent=my-agent"
