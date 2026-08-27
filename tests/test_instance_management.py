@@ -959,16 +959,62 @@ def test_mcp_execute_schema_exposes_numeric_timeout_default() -> None:
     }
 
 
-def test_mcp_session_fields_accept_omp_transcript() -> None:
+def test_mcp_session_fields_retain_all_request_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("IDA_NEXUS_ID", "trusted-nexus-id")
+
     assert mcp_app._session_fields_from_meta(
         {
-            "omp_session_path": "/tmp/omp-session.jsonl",
-            "unrelated": "ignored",
+            "dsh_session_id": "session-42",
+            "future_agent_session_path": "/tmp/future-session.jsonl",
+            "future_agent": {"name": "example", "version": 1},
+            "enabled": False,
+            "nexus_id": "untrusted-nexus-id",
         }
     ) == {
-        "nexus_id": None,
-        "omp_session_path": "/tmp/omp-session.jsonl",
+        "dsh_session_id": "session-42",
+        "future_agent_session_path": "/tmp/future-session.jsonl",
+        "future_agent": {"name": "example", "version": 1},
+        "enabled": False,
+        "nexus_id": "trusted-nexus-id",
     }
+
+
+def test_mcp_trace_is_created_on_first_tool_call(tmp_path: Path, monkeypatch) -> None:
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(mcp_app, "SESSIONS_DIR", sessions_dir)
+    trace = mcp_app._TraceLogger()
+
+    trace.emit("mcp_started", agent="test-agent")
+    trace.emit("mcp_initialized", clientInfo={"name": "test-client"})
+
+    assert not sessions_dir.exists()
+    assert not trace.path.exists()
+
+    trace.emit("tool_call", call_id="call-1", tool="list_databases")
+    trace.emit("tool_result", call_id="call-1", tool="list_databases")
+
+    records = [json.loads(line) for line in trace.path.read_text().splitlines()]
+    assert [record["event"] for record in records] == [
+        "mcp_started",
+        "mcp_initialized",
+        "tool_call",
+        "tool_result",
+    ]
+
+
+def test_mcp_trace_is_discarded_without_a_tool_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(mcp_app, "SESSIONS_DIR", sessions_dir)
+    trace = mcp_app._TraceLogger()
+
+    trace.emit("mcp_started", agent="test-agent")
+    trace.emit("mcp_initialized", clientInfo={"name": "test-client"})
+    trace.emit("mcp_stopped")
+
+    assert not sessions_dir.exists()
+    assert not trace.path.exists()
 
 
 def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:

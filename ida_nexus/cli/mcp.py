@@ -107,18 +107,33 @@ def _trace_jsonable(value: Any) -> Any:
 
 
 class _TraceLogger:
-    """Thread-safe semantic trace owned by this MCP server."""
+    """Thread-safe semantic trace created lazily on the first tool call."""
 
     def __init__(self) -> None:
         self.server_id = uuid.uuid4().hex[:12]
+        self.path = SESSIONS_DIR / f"{self.server_id}.jsonl"
+        self._lock = threading.Lock()
+        self._buffer: list[str] = []
+        self._active = False
+
+    def _activate(self, encoded: str) -> None:
         SESSIONS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             SESSIONS_DIR.chmod(0o700)
         except OSError:
             if os.name != "nt":
                 raise
-        self.path = SESSIONS_DIR / f"{self.server_id}.jsonl"
-        self._lock = threading.Lock()
+        self._append(encoded)
+
+    def _append(self, encoded: str) -> None:
+        fd = os.open(
+            self.path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        with os.fdopen(fd, "a", encoding="utf-8") as file:
+            file.write(encoded)
+            file.flush()
 
     def emit(self, event: str, **fields: Any) -> None:
         record = {
@@ -138,14 +153,18 @@ class _TraceLogger:
             + "\n"
         )
         with self._lock:
-            fd = os.open(
-                self.path,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o600,
-            )
-            with os.fdopen(fd, "a", encoding="utf-8") as file:
-                file.write(encoded)
-                file.flush()
+            if self._active:
+                self._append(encoded)
+                return
+
+            self._buffer.append(encoded)
+            if event == "tool_call":
+                self._activate("".join(self._buffer))
+                self._buffer.clear()
+                self._active = True
+            elif event == "mcp_stopped":
+                # A connection that never called a tool leaves no session trace.
+                self._buffer.clear()
 
 
 TRACE = _TraceLogger()
@@ -155,18 +174,11 @@ _TRACE_CALL_ID: ContextVar[str | None] = ContextVar(
 
 
 def _session_fields_from_meta(meta: dict[str, Any]) -> dict[str, Any]:
-    fields: dict[str, Any] = {
-        "nexus_id": os.environ.get("IDA_NEXUS_ID") or None,
-    }
-    for name in (
-        "claude_session_path",
-        "codex_session_path",
-        "pi_session_path",
-        "omp_session_path",
-    ):
-        value = meta.get(name)
-        if isinstance(value, str) and value:
-            fields[name] = value
+    """Retain request metadata for future agent/session integrations."""
+    fields = dict(meta)
+    # The process environment is authoritative for the Nexus session identity;
+    # request metadata must not be able to spoof it.
+    fields["nexus_id"] = os.environ.get("IDA_NEXUS_ID") or None
     return fields
 
 
@@ -202,7 +214,7 @@ def _install_initialize_trace_adapter() -> None:
 
 
 def _install_hook_input_meta_adapter() -> None:
-    """Promote Claude/Codex hook metadata into MCP request metadata."""
+    """Promote metadata embedded in tool arguments into MCP request metadata."""
     original_tools_call = mcp.registry.methods["tools/call"]
 
     def tools_call_with_meta(
