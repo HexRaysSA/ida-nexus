@@ -22,24 +22,14 @@ VERSION_RE = re.compile(
     r"(?:(?:-dev\.|\.dev)(?P<dev>[1-9]\d*))?$"
 )
 
-# JSON pointers and occurrence counts are explicit so unrelated dependency
-# versions in package-lock.json are never changed.
 JSON_FIELDS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "package.json": (("version",),),
-    "package-lock.json": (("version",), ("packages", "", "version")),
     "ida-plugin.json": (("plugin", "version"),),
-    ".claude-plugin/plugin.json": (("version",),),
-    ".codex-plugin/plugin.json": (("version",),),
 }
 MANAGED_FILES = (
-    "package.json",
-    "package-lock.json",
     "pyproject.toml",
     "uv.lock",
     "ida-plugin.json",
     "ida_nexus/_http.py",
-    ".claude-plugin/plugin.json",
-    ".codex-plugin/plugin.json",
 )
 
 
@@ -94,9 +84,6 @@ def _replace_json_versions(path: str, text: str, old: str, new: str) -> str:
             rendered = "/".join(pointer)
             raise VersionError(f"{path}: {rendered} is {actual!r}, expected {old!r}")
 
-    # Version fields are at the start of each managed JSON document. Limiting
-    # replacement count matters for package-lock dependencies that happen to
-    # have the same version as this project.
     pattern = re.compile(rf'(?m)^(\s*"version"\s*:\s*)"{re.escape(old)}"(,?)$')
     matches = list(pattern.finditer(text))
     if len(matches) < len(pointers):
@@ -160,7 +147,7 @@ def _updated_files(old: str, new: str) -> dict[str, str]:
 def _next_version(current: str, requested: str) -> str:
     exact = VERSION_RE.fullmatch(requested)
     if exact:
-        # Always use one spelling across both Python and Node packaging.
+        # Always use one spelling across Python packaging and the IDA plugin.
         dev = exact.group("dev")
         base = f"{exact.group('major')}.{exact.group('minor')}.{exact.group('patch')}"
         return f"{base}-dev.{dev}" if dev else base

@@ -38,8 +38,8 @@ uv run ida-nexus mcp
 The manually dispatched `.github/workflows/release.yml` workflow bumps, commits,
 tags, publishes to PyPI, and creates a GitHub release. For the initial release,
 `release-current` publishes and tags the version already in the manifests without
-bumping it. All Python, Node, IDA, Claude, and Codex version declarations are
-managed together by one script:
+bumping it. The Python package, IDA plugin, and HTTP server version declarations
+are managed together by one script:
 
 ```bash
 python scripts/bump_version.py --check
