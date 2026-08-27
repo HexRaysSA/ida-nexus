@@ -3,6 +3,8 @@ name = "ida-nexus"
 version = "0.8.0"
 description = "IDA Nexus allows multiple clients to seamlessly share and operate on IDA databases."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "ida-domain>=0.5.1",
