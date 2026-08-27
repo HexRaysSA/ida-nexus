@@ -27,7 +27,8 @@ connection expresses one client's interest in an already-running database.
 
 | Component | Responsibility |
 |---|---|
-| `ida_nexus_plugin.py` | Starts the Nexus service inside interactive IDA, prevents duplicate GUI registration, and detaches without closing the GUI database. |
+| `ida_nexus/plugin.py` | Idempotent, process-wide GUI plugin lifecycle. The first plugin entry point to call `init(owner=...)` owns lifecycle log attribution; all entry points share one service and call `term()` during IDA shutdown. |
+| `ida_nexus_plugin.py` | Standalone `plugin_t` entry point that delegates explicitly to `ida_nexus.plugin`. Other plugins can define their own `plugin_t` metadata and use the same lifecycle. |
 | `ida_nexus/cli/worker.py` | Opens an executable or IDB with idalib, starts the service, and closes/saves the database when its lifecycle ends. Resolver-spawned workers are managed; directly launched workers are unmanaged unless `--managed` is passed. |
 | `ida_nexus/_http.py` | Loopback HTTP/1.1 listener, bearer/host/browser checks, bounded framing and decompression, and streamed responses. |
 | `ida_nexus/_server.py` | Nexus routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |

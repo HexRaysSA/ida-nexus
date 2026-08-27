@@ -43,6 +43,8 @@ from typing import (
 )
 from urllib.parse import urlparse
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 MCP_ENVIRONMENT_VARIABLES = (
@@ -561,9 +563,46 @@ def _compatible_gui_plugin(plugin_dir: Path, required_version: str) -> bool:
         return False
 
 
+def _declares_nexus_gui_provider(plugin_dir: Path, expected_name: str) -> bool:
+    """Check a consumer plugin that delegates to the installed Nexus package."""
+
+    try:
+        document = json.loads(
+            (plugin_dir / "ida-plugin.json").read_text(encoding="utf-8")
+        )
+        metadata = document["plugin"]
+        if metadata["name"] != expected_name:
+            return False
+        entry_point = metadata["entryPoint"]
+        dependencies = metadata["pythonDependencies"]
+        if not isinstance(entry_point, str) or not (plugin_dir / entry_point).is_file():
+            return False
+        if not isinstance(dependencies, list):
+            return False
+        return any(
+            canonicalize_name(Requirement(dependency).name) == "ida-nexus"
+            for dependency in dependencies
+            if isinstance(dependency, str)
+        )
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        InvalidRequirement,
+    ):
+        return False
+
+
 def _gui_plugin_installed() -> bool:
-    plugin_dir = _get_idausr_dir() / "plugins" / "ida-nexus"
-    return _compatible_gui_plugin(plugin_dir, PACKAGE_VERSION)
+    plugins_dir = _get_idausr_dir() / "plugins"
+    if _compatible_gui_plugin(plugins_dir / "ida-nexus", PACKAGE_VERSION):
+        return True
+    return any(
+        _declares_nexus_gui_provider(plugins_dir / name, name)
+        for name in ("ida-mcp", "ida-chat")
+    )
 
 
 class ListDatabasesToolResult(ListDatabasesResult):

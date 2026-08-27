@@ -620,6 +620,27 @@ def test_mcp_gui_plugin_rejects_missing_or_invalid_version(tmp_path: Path) -> No
         assert mcp_app._compatible_gui_plugin(plugin_dir, "1.2.3") is False
 
 
+def test_mcp_recognizes_consumer_gui_provider(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugins" / "ida-mcp"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "ida_mcp_plugin.py").touch()
+    (plugin_dir / "ida-plugin.json").write_text(
+        json.dumps(
+            {
+                "plugin": {
+                    "name": "ida-mcp",
+                    "entryPoint": "ida_mcp_plugin.py",
+                    "pythonDependencies": ["ida-nexus>=0.7.0"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert mcp_app._declares_nexus_gui_provider(plugin_dir, "ida-mcp") is True
+    assert mcp_app._declares_nexus_gui_provider(plugin_dir, "ida-chat") is False
+
+
 def test_pi_package_includes_runtime_peers_and_gui_manifest() -> None:
     root = Path(__file__).parents[1]
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
