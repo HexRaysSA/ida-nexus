@@ -441,7 +441,7 @@ def open_database(
         "Whether this database should become the default target for execute_python().",
     ] = True,
 ) -> OpenDatabaseToolResult:
-    """Attach to a GUI database or shared managed idalib worker."""
+    """Attach to a GUI database or shared managed idalib worker through IDA Nexus."""
 
     result = DATABASE_MANAGER.open_database(path, set_current=set_current)
     session = _session_fields()
@@ -572,7 +572,7 @@ class ListDatabasesToolResult(ListDatabasesResult):
 
 @tool
 def list_databases() -> ListDatabasesToolResult:
-    """Discover registered GUI and idalib databases."""
+    """Discover registered GUI and idalib databases in IDA Nexus."""
     result = ListDatabasesToolResult(**DATABASE_MANAGER.list_databases())
     if not _gui_plugin_installed():
         result["hint"] = (
@@ -600,7 +600,7 @@ def close_database(
         "Optional database instance id. If omitted, release the current target.",
     ] = None,
 ) -> CloseDatabaseResult:
-    """Release this MCP server's handle without disrupting other clients.
+    """Release this MCP's IDA Nexus database handle without disrupting other clients.
 
     If this is the final lease on a managed idalib worker, orphaned execution is
     cancelled and this call waits for the IDB to finish closing. GUI databases are
