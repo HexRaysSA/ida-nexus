@@ -229,6 +229,15 @@ def init(*, owner: str) -> bool:
     return True
 
 
+def start() -> None:
+    """Start an initialized GUI service after its database becomes available."""
+
+    component = _component
+    if component is None:
+        raise RuntimeError("IDA Nexus plugin is not initialized")
+    component.start_server()
+
+
 def run(*, caller: str) -> None:
     """Report shared service status for the plugin menu item being invoked."""
 

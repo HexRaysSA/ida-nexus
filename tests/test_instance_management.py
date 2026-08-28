@@ -25,6 +25,7 @@ from ida_nexus import (
     find_database_owner,
     wait_database_released,
 )
+from ida_nexus import mcp as mcp_app
 from ida_nexus._http import RequestHandler
 from ida_nexus._registry import (
     PROTOCOL_VERSION,
@@ -41,7 +42,6 @@ from ida_nexus._registry import (
 from ida_nexus._resolver import resolve_instance
 from ida_nexus._runtime import AnalysisState, IdbChangeState
 from ida_nexus._server import NexusHTTPServer
-from ida_nexus.cli import mcp as mcp_app
 from ida_nexus.cli.worker import (
     _build_ida_options,
     _image_base_to_paragraphs,

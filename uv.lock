@@ -31,7 +31,7 @@ dev = [
 requires-dist = [
     { name = "ida-domain", specifier = ">=0.5.1" },
     { name = "packaging" },
-    { name = "zeromcp", specifier = ">=1.8.0" },
+    { name = "zeromcp", specifier = ">=1.9.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -151,9 +151,9 @@ wheels = [
 
 [[package]]
 name = "zeromcp"
-version = "1.8.0"
+version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/30/d7/606457fc543e5b25f190b1513c3623cbb9683cf27d62be0656ebf2c7b26b/zeromcp-1.8.0.tar.gz", hash = "sha256:682817c488593ff4ec831f79db06415f2d2ff31db98e58e5fff9d9116c042ff3", size = 99866, upload-time = "2026-08-10T19:17:11.221Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/1f/97c16db209141a5155255ea315af5f85d623d25b9ba092471240ad74ef14/zeromcp-1.9.0.tar.gz", hash = "sha256:41bcfe76d82d9bcb149739bf89efd7121fa1ac818c21554216c9cc72293e6cc9", size = 104783, upload-time = "2026-08-28T23:44:08.752Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/d9/f46820d2eca9c4c984348d9a2f39d4e59192cdaaebc12895e92d38a742f6/zeromcp-1.8.0-py3-none-any.whl", hash = "sha256:7f270a901f0e2327c369509757c455faa1eeb0513e758dbbb25f4923f089f77a", size = 23666, upload-time = "2026-08-10T19:17:10.027Z" },
+    { url = "https://files.pythonhosted.org/packages/82/dd/51cb92f10792c494d62bbffd26d726dafdde5e238a987978bf489015262b/zeromcp-1.9.0-py3-none-any.whl", hash = "sha256:705bea4cde8c6daf07fd8ad69bfc8eedb7f72400a6e2339e0eb53af111e29b38", size = 25879, upload-time = "2026-08-28T23:44:07.906Z" },
 ]

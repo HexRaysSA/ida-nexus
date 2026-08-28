@@ -39,8 +39,9 @@ connection expresses one client's interest in an already-running database.
 | `ida_nexus/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Nexus Python runtime. |
 | `ida_nexus/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
 | `ida_nexus/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
-| `ida_nexus/cli/` | Implements the single `ida-nexus` entry point and its MCP, dashboard, execution, logs, benchmark, and internal worker subcommands. |
-| `ida_nexus/cli/mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
+| `ida_nexus/mcp.py` | Reusable ZeroMCP tools and transports, manager composition, error mapping, startup attachment, and semantic session tracing. |
+| `ida_nexus/cli/` | Implements the single `ida-nexus` entry point plus thin MCP, dashboard, execution, logs, benchmark, and internal worker command adapters. |
+| `ida_nexus/cli/mcp.py` | Parses MCP CLI and agent-hook arguments, then invokes the reusable `ida_nexus.mcp` API. |
 | `ida-nexus.ts` | Shared Pi/oh-my-pi extension that starts MCP asynchronously from `session_start`, mirrors its tools with `ida_` names, attaches compatible transcript metadata, and applies host output truncation. Both hosts can enter the session immediately; their lifecycle runners publish late tool registrations before the first model turn. |
 | `ida_nexus/cli/dashboard.py` | Renders semantic session traces and linked Claude, Codex, Pi, or oh-my-pi transcripts from the local state directory or a portable log ZIP. |
 | `ida_nexus/cli/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
@@ -425,9 +426,13 @@ Tools are:
 
 `--database` schedules a startup attachment without blocking MCP
 initialization; an operation that needs the current target waits for that
-startup attempt. The server normally runs over stdio, with an opt-in ZeroMCP
-HTTP transport. The Pi extension is an MCP client adapter rather than a second
-implementation of these tools. The MCP adapter explicitly applies the initial
+startup attempt. The server normally runs over stdio, with an opt-in reusable
+ZeroMCP HTTP transport. HTTP can run in background embedding mode or unattended
+foreground mode. A host may supply a `DatabaseManager` subclass and constructor
+arguments, register traced tools with `ida_nexus.mcp.tool`, and select a native
+ZeroMCP HTTP path prefix without importing CLI implementation details. The Pi
+extension is an MCP client adapter rather than a second implementation of these tools.
+The MCP adapter explicitly applies the initial
 analysis policy before calling the session manager's `execute_python`; the
 upstream route and handle execution method remain independent of analysis. The
 initial analysis wait is unbounded and does not consume the MCP tool's separate
