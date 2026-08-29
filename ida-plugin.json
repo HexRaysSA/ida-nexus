@@ -7,7 +7,7 @@
     "keywords": ["python", "automation", "idalib", "ai"],
     "description": "Authenticated local Python execution for IDA GUI and command-line idalib sessions.",
     "idaVersions": ["9.4", "10.0"],
-    "version": "0.8.1",
+    "version": "0.9.0",
     "license": "MIT",
     "authors": [
       {
@@ -19,7 +19,7 @@
       "repository": "https://github.com/HexRaysSA/ida-nexus"
     },
     "pythonDependencies": [
-      "ida-nexus==0.8.1"
+      "ida-nexus==0.9.0"
     ]
   }
 }
