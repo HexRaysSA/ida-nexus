@@ -2,7 +2,7 @@
 
 Serves a local HTTP UI (stdlib only, no extra dependencies) that lists the
 JSONL traces under ``<IDAUSR>/nexus/sessions`` and renders each MCP/agent
-session as a timeline linked to its Claude Code, Codex, Pi, or OMP transcript.
+session as a timeline linked to its agent transcript.
 
 Run with: ida-nexus dashboard [--host 127.0.0.1] [--port 8736] [--open]
 """
@@ -23,7 +23,11 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from ida_nexus.cli.logs import LogArchiveError, open_log_archive
+from ida_nexus.cli.logs import (
+    LogArchiveError,
+    iter_agent_session_paths,
+    open_log_archive,
+)
 from ida_nexus.paths import STATE_DIR
 
 DEFAULT_SESSIONS_DIR = STATE_DIR / "sessions"
@@ -381,15 +385,13 @@ def _summarize_session(
         nexus_id = session.get("nexus_id")
         if isinstance(nexus_id, str) and nexus_id:
             summary.nexus_id = nexus_id
-        for kind in ("claude", "codex", "pi", "omp"):
-            session_path = session.get(f"{kind}_session_path")
-            if isinstance(session_path, str) and session_path:
-                if agent_transcript is not None:
-                    session_path = str(agent_transcript)
-                else:
-                    session_path = _resolve_agent_session_path(session_path, path)
-                summary.agent_sessions[kind] = session_path
-                summary.agent_session_refs.add((kind, session_path))
+        for kind, session_path in iter_agent_session_paths(session):
+            if agent_transcript is not None:
+                session_path = str(agent_transcript)
+            else:
+                session_path = _resolve_agent_session_path(session_path, path)
+            summary.agent_sessions[kind] = session_path
+            summary.agent_session_refs.add((kind, session_path))
 
         event = record.get("event")
         if event == "mcp_started":

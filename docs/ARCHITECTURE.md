@@ -43,7 +43,7 @@ connection expresses one client's interest in an already-running database.
 | `ida_nexus/cli/` | Implements the single `ida-nexus` entry point plus thin MCP, dashboard, execution, logs, benchmark, and internal worker command adapters. |
 | `ida_nexus/cli/mcp.py` | Parses MCP CLI and agent-hook arguments, then invokes the reusable `ida_nexus.mcp` API. |
 | `ida-nexus.ts` | Shared Pi/oh-my-pi extension that starts MCP asynchronously from `session_start`, mirrors its tools with `ida_` names, attaches compatible transcript metadata, and applies host output truncation. Both hosts can enter the session immediately; their lifecycle runners publish late tool registrations before the first model turn. |
-| `ida_nexus/cli/dashboard.py` | Renders semantic session traces and linked Claude, Codex, Pi, or oh-my-pi transcripts from the local state directory or a portable log ZIP. |
+| `ida_nexus/cli/dashboard.py` | Renders semantic session traces and linked agent transcripts from the local state directory or a portable log ZIP. |
 | `ida_nexus/cli/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
 | `scripts/migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
 
@@ -462,12 +462,14 @@ by `call_id`. Database binding events contain MCP-local and registry identity,
 including the worker operational log path, and inherit the active `call_id`
 when emitted during a tool invocation.
 
-The Claude and Codex `PreToolUse` hooks and the Pi extension attach transcript
-paths as hidden `_meta` fields. The MCP adapter promotes those fields into
-request metadata and removes them from public tool arguments. Each tool event
-records the applicable `nexus_id` and agent transcript path under `session`.
-This supports one MCP process serving multiple agent sessions and several
-agents sharing one IDA worker.
+Agent integrations attach transcript paths as hidden `_meta` fields using the
+`<agent-kind>_session_path` convention (for example, `omp_session_path`). The
+MCP adapter promotes those fields into request metadata and removes them from
+public tool arguments. Each tool event records the applicable `nexus_id` and
+agent transcript path under `session`. The optional MCP `--agent` value is a
+process-level display and operation label; transcript correlation uses the
+request metadata because one MCP process can serve multiple agent sessions and
+agent kinds. This also supports several agents sharing one IDA worker.
 
 Semantic tracing remains at the MCP layer because only that layer can observe
 `reference`, list operations, resolution failures, and agent metadata. Worker
@@ -479,9 +481,11 @@ database events to their unambiguous call interval, renders executed Python and
 reference output, distinguishes MCP results and model-facing errors from
 internal diagnostic metadata, lists all database targets and best-effort
 transcript model names, and interleaves non-IDA activity from referenced agent
-transcripts. Timestamped agent records outside the recognized Claude, Codex, and
-Pi event shapes are retained as collapsed raw-JSON fallback events instead of
-being silently discarded. The dashboard can also auto-detect the benchmark run
+transcripts. The log exporter and dashboard recognize any agent kind that uses
+the `<agent-kind>_session_path` metadata convention. Timestamped agent records
+outside the recognized Claude, Codex, and Pi event shapes are retained as
+collapsed raw-JSON fallback events instead of being silently discarded. The
+dashboard can also auto-detect the benchmark run
 layout, select Pi's active transcript branch, summarize available token/cost
 data, and export a self-contained session page. Its `/agent` route serves only
 transcript paths referenced by discoverable semantic sessions.

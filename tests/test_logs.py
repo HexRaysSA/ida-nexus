@@ -138,6 +138,42 @@ class LogArchiveTests(unittest.TestCase):
                     self.assertIn(entry["archive_path"], archive.namelist())
                     self.assertEqual(len(entry["sha256"]), 64)
 
+    def test_archive_collects_conventional_paths_for_any_agent_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            omp_agent = root / "agents" / "omp.jsonl"
+            future_agent = root / "agents" / "future.jsonl"
+            session = root / "sessions" / "semantic.jsonl"
+            _write_jsonl(omp_agent, _pi_records())
+            _write_jsonl(future_agent, _pi_records())
+            records = _semantic_records("generic")
+            linked = {
+                "omp_session_path": str(omp_agent),
+                "future_agent_session_path": str(future_agent),
+                "unrelated_path": str(root / "do-not-collect.jsonl"),
+            }
+            for record in records:
+                record["agent"] = "omp"
+                record["session"] = linked
+            _write_jsonl(session, records)
+
+            output = root / "generic.zip"
+            result = create_log_archive(output, [session])
+
+            self.assertEqual(result.agent_session_count, 2)
+            with zipfile.ZipFile(output) as archive:
+                toc = json.loads(archive.read(TOC_NAME))
+                references = toc["sessions"][0]["agent_sessions"]
+                self.assertEqual(
+                    {reference["kind"] for reference in references},
+                    {"omp", "future_agent"},
+                )
+                self.assertNotIn(str(root / "do-not-collect.jsonl"), toc["path_map"])
+
+            with open_log_archive(output) as view, _dashboard_archive(view):
+                summary = dashboard._scan_sessions()[0]
+                self.assertEqual(set(summary.agent_sessions), {"omp", "future_agent"})
+
     def test_operational_logs_are_included_without_toc_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

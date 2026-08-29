@@ -27,7 +27,7 @@ TOC_NAME = "ida-nexus-logs.json"
 DEFAULT_SESSIONS_DIR = STATE_DIR / "sessions"
 DEFAULT_LOGS_DIR = STATE_DIR / "logs"
 
-_AGENT_KINDS = ("claude", "codex", "pi")
+_AGENT_SESSION_PATH_SUFFIX = "_session_path"
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -168,16 +168,25 @@ def _find_agent_file(recorded_path: str, semantic_session: Path) -> Path | None:
     return None
 
 
+def iter_agent_session_paths(session: object) -> Iterator[tuple[str, str]]:
+    """Yield ``(agent kind, path)`` pairs from conventional session metadata."""
+
+    if not isinstance(session, dict):
+        return
+    for field, value in session.items():
+        if not isinstance(field, str) or not field.endswith(_AGENT_SESSION_PATH_SUFFIX):
+            continue
+        kind = field[: -len(_AGENT_SESSION_PATH_SUFFIX)]
+        if kind and isinstance(value, str) and value:
+            yield kind, value
+
+
 def _agent_references(path: Path) -> list[_AgentReference]:
     references: list[_AgentReference] = []
     seen: set[tuple[str, str]] = set()
     for record in _read_json_records(path):
-        session = record.get("session")
-        if not isinstance(session, dict):
-            continue
-        for kind in _AGENT_KINDS:
-            value = session.get(f"{kind}_session_path")
-            if not isinstance(value, str) or not value or (kind, value) in seen:
+        for kind, value in iter_agent_session_paths(record.get("session")):
+            if (kind, value) in seen:
                 continue
             seen.add((kind, value))
             references.append(
@@ -186,9 +195,13 @@ def _agent_references(path: Path) -> list[_AgentReference]:
     return references
 
 
+def _archive_component(value: str, *, default: str) -> str:
+    component = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return (component or default)[:120]
+
+
 def _archive_basename(path: Path) -> str:
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", path.name).strip("._")
-    return (name or "session.jsonl")[:120]
+    return _archive_component(path.name, default="session.jsonl")
 
 
 def _operational_logs(logs_dir: Path, output: Path) -> list[tuple[Path, str]]:
@@ -285,8 +298,9 @@ def create_log_archive(
             existing = agents.get(reference.source_path)
             if existing is None:
                 index = len(agents) + 1
+                kind = _archive_component(reference.kind, default="agent")
                 member = (
-                    f"agent-sessions/{index:04d}-{reference.kind}-"
+                    f"agent-sessions/{index:04d}-{kind}-"
                     f"{_archive_basename(reference.source_path)}"
                 )
                 agents[reference.source_path] = (reference.kind, member)
@@ -562,7 +576,11 @@ def _extract_log_archive(archive_path: Path, root: Path) -> LogArchiveView:
                 recorded = raw_agent.get("recorded_path")
                 agent_source = raw_agent.get("source_path")
                 agent_member = raw_agent.get("archive_path")
-                if kind not in _AGENT_KINDS or not isinstance(recorded, str):
+                if (
+                    not isinstance(kind, str)
+                    or not kind
+                    or not isinstance(recorded, str)
+                ):
                     raise LogArchiveError(
                         f"invalid agent session reference in {TOC_NAME}"
                     )
@@ -616,7 +634,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="ida-nexus logs",
         description=(
             "Create a ZIP containing ida-nexus semantic sessions, linked "
-            "Claude, Codex, or Pi transcripts, and operational logs."
+            "agent transcripts, and operational logs."
         ),
     )
     parser.add_argument(
