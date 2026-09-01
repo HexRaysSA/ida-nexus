@@ -23,6 +23,7 @@ from .models import DatabaseChangeEvent, PythonExecutionResult
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
 USER_CODE_FILENAME = "<ida-nexus>"
+_OPERATION_INTERRUPT_GLOBAL = "__ida_nexus_operation_interrupt__"
 AUTOANALYSIS_SLICE_SECONDS = 0.02
 AUTOANALYSIS_SLICE_STEPS = 256
 
@@ -203,6 +204,36 @@ class _DeadlineScheduler:
 
 _deadline_scheduler = _DeadlineScheduler()
 
+def _protect_operation_interrupt(module: ast.Module) -> None:
+    """Keep submitted exception handlers from consuming Nexus cancellation."""
+
+    for node in ast.walk(module):
+        if not isinstance(node, (ast.Try, ast.TryStar)) or not node.handlers:
+            continue
+        anchor = node.handlers[0]
+        interrupt_type = ast.copy_location(
+            ast.Name(id=_OPERATION_INTERRUPT_GLOBAL, ctx=ast.Load()),
+            anchor.type or anchor,
+        )
+        if isinstance(node, ast.TryStar):
+            # A bare raise from ``except*`` preserves its synthetic exception
+            # group. Raise a fresh sentinel for _run_sync's cancellation handler.
+            reraised_interrupt = ast.copy_location(
+                ast.Name(id=_OPERATION_INTERRUPT_GLOBAL, ctx=ast.Load()),
+                anchor.type or anchor,
+            )
+            reraiser = ast.copy_location(
+                ast.Raise(exc=reraised_interrupt),
+                anchor,
+            )
+        else:
+            reraiser = ast.copy_location(ast.Raise(), anchor)
+        handler = ast.copy_location(
+            ast.ExceptHandler(type=interrupt_type, name=None, body=[reraiser]),
+            anchor,
+        )
+        node.handlers.insert(0, handler)
+
 
 def _execute_user_code(
     code: str,
@@ -218,6 +249,8 @@ def _execute_user_code(
         raise CodeValidationError("code must not be empty")
 
     module = ast.parse(stripped, filename=filename, mode="exec")
+    _protect_operation_interrupt(module)
+    namespace[_OPERATION_INTERRUPT_GLOBAL] = _OperationInterrupt
     previous_entrypoints = {
         name: namespace.get(name) for name in ("run", "execute", "main")
     }

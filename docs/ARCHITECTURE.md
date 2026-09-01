@@ -235,8 +235,11 @@ result. As an alternative, code without a trailing
 expression may define `run(db)`, `execute(db)`, or `main(db)` for automatic
 invocation. Native IDA cancellation and a targeted asynchronous CPython
 exception interrupt both native work and pure-Python loops without installing a
-per-line or per-opcode trace hook. Generation checks prevent a late timeout from
-poisoning the next operation.
+per-line or per-opcode trace hook. Before compilation, Nexus gives every
+submitted exception handler a higher-priority cancellation branch so bare
+`except` and `except BaseException` clauses cannot consume that private
+interrupt. Generation checks prevent a late timeout from poisoning the next
+operation.
 
 ## Protocol contract and versioning
 

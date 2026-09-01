@@ -137,6 +137,20 @@ def test_old_entrypoint_is_not_reused_and_result_is_per_call() -> None:
         _execute_user_code("result", namespace, runtime)
 
 
+def test_execute_user_code_preserves_ordinary_broad_exception_handlers() -> None:
+    namespace = _namespace()
+    runtime = {"db": namespace["db"]}
+
+    assert (
+        _execute_user_code(
+            "try:\n    raise ValueError('expected')\nexcept:\n    result = 41",
+            namespace,
+            runtime,
+        )
+        == 41
+    )
+
+
 def _inline_runtime(monkeypatch: pytest.MonkeyPatch) -> IDARuntime:
     monkeypatch.setitem(__import__("sys").modules, "ida_domain", SimpleNamespace())
     runtime = object.__new__(IDARuntime)
@@ -161,6 +175,45 @@ def _inline_runtime(monkeypatch: pytest.MonkeyPatch) -> IDARuntime:
 
     monkeypatch.setattr(runtime, "_run_sync", run_inline)
     return runtime
+
+
+@pytest.mark.parametrize("handler", ("except:", "except BaseException:"))
+def test_execute_python_protects_cancellation_from_generated_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: str,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    interrupt_name = runtime_module._OPERATION_INTERRUPT_GLOBAL
+    code = (
+        "def run():\n"
+        "    for _ in range(1):\n"
+        "        try:\n"
+        f"            raise {interrupt_name}\n"
+        f"        {handler}\n"
+        "            continue\n"
+        "    return 'swallowed'\n"
+    )
+
+    with pytest.raises(runtime_module._OperationInterrupt):
+        runtime.execute_python(code, timeout=1.0)
+
+
+def test_execute_python_protects_cancellation_from_generated_except_star(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    interrupt_name = runtime_module._OPERATION_INTERRUPT_GLOBAL
+    code = (
+        "def run():\n"
+        "    try:\n"
+        f"        raise {interrupt_name}\n"
+        "    except* BaseException:\n"
+        "        swallowed = True\n"
+        "    return swallowed\n"
+    )
+
+    with pytest.raises(runtime_module._OperationInterrupt):
+        runtime.execute_python(code, timeout=1.0)
 
 
 def test_autoanalysis_slices_release_before_completion(
