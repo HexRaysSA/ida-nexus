@@ -116,6 +116,7 @@ class DatabaseManager:
         open_timeout: float = DEFAULT_OPEN_TIMEOUT_SECONDS,
         execute_timeout: float = DEFAULT_EXECUTE_TIMEOUT_SECONDS,
         keepalive: float = 0.0,
+        idle_timeout: float | None = None,
     ) -> None:
         if not math.isfinite(open_timeout) or open_timeout <= 0:
             raise ValueError("open_timeout must be a positive finite number")
@@ -129,10 +130,20 @@ class DatabaseManager:
             raise ValueError(
                 f"keepalive must be between 0 and {MAX_KEEPALIVE_SECONDS:g} seconds"
             )
+        if idle_timeout is not None and (
+            isinstance(idle_timeout, bool)
+            or not isinstance(idle_timeout, (int, float))
+            or not math.isfinite(idle_timeout)
+            or idle_timeout <= 0
+        ):
+            raise ValueError("idle_timeout must be a positive finite number or None")
         self._on_event = on_event
         self._open_timeout = open_timeout
         self._execute_timeout = execute_timeout
         self._keepalive = float(keepalive)
+        self._idle_timeout = (
+            float(idle_timeout) if idle_timeout is not None else None
+        )
         self._instances: dict[str, _DatabaseSession] = {}
         self._disconnected_instances: dict[str, str] = {}
         self._disconnected_default: str | None = None
@@ -221,6 +232,7 @@ class DatabaseManager:
                     options=DatabaseOpenOptions(
                         startup_timeout=self._open_timeout,
                         keepalive=self._keepalive,
+                        idle_timeout=self._idle_timeout,
                         # Publish the worker first, then start analysis through
                         # its normal Nexus operation and hook lifecycle.
                         auto_analysis=True,

@@ -795,6 +795,159 @@ def test_sse_health_holds_and_releases_a_client_lease(tmp_path: Path):
         server.release_registration()
 
 
+def test_managed_lease_expires_after_its_idle_timeout(tmp_path: Path):
+    stopped = threading.Event()
+    analysis = AnalysisState()
+    backend = RecordingBackend(analysis)
+    server = NexusHTTPServer(
+        backend,
+        InstanceIdentity(
+            "/tmp/test.i64",
+            "/tmp/test.exe",
+            "idalib",
+            managed=True,
+        ),
+        analysis,
+        tmp_path,
+        lease_grace=30,
+        heartbeat_interval=0.02,
+        on_shutdown=stopped.set,
+    )
+    server.start()
+    connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    try:
+        connection.request(
+            "GET",
+            "/health?sse=1&lease_id=timed&idle_timeout=0.1",
+            headers={
+                "Authorization": f"Bearer {server.token}",
+                "Accept": "text/event-stream",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.readline() == b"event: health\n"
+        while response.readline() != b"event: lease_expired\n":
+            pass
+        payload = response.readline()
+        assert json.loads(payload.removeprefix(b"data: ")) == {
+            "reason": "idle_timeout",
+            "idle_timeout": 0.1,
+        }
+        assert stopped.wait(1)
+    finally:
+        connection.close()
+        server.stop()
+        server.release_registration()
+
+
+def test_active_request_suspends_lease_idle_expiration(tmp_path: Path):
+    analysis = AnalysisState()
+    server = NexusHTTPServer(
+        RecordingBackend(analysis),
+        InstanceIdentity(
+            "/tmp/test.i64",
+            "/tmp/test.exe",
+            "idalib",
+            managed=True,
+        ),
+        analysis,
+        tmp_path,
+        lease_grace=30,
+        heartbeat_interval=0.02,
+    )
+    server.start()
+    try:
+        lease = server._lease_opened("timed", 0, idle_timeout=0.05)
+        assert lease is not None
+        server._request_started("timed")
+        time.sleep(0.1)
+        assert not lease.expiring
+        server._request_finished("timed")
+        deadline = time.monotonic() + 1
+        while not lease.expiring and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert lease.expiring
+        server._lease_closed("timed")
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_indefinite_lease_keeps_worker_after_timed_lease_expires(
+    tmp_path: Path,
+):
+    stopped = threading.Event()
+    analysis = AnalysisState()
+    backend = RecordingBackend(analysis)
+    server = NexusHTTPServer(
+        backend,
+        InstanceIdentity(
+            "/tmp/test.i64",
+            "/tmp/test.exe",
+            "idalib",
+            managed=True,
+        ),
+        analysis,
+        tmp_path,
+        lease_grace=30,
+        heartbeat_interval=0.02,
+        on_shutdown=stopped.set,
+    )
+    server.start()
+    timed = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    indefinite = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    try:
+        timed.request(
+            "GET",
+            "/health?sse=1&lease_id=timed&idle_timeout=0.1",
+            headers={
+                "Authorization": f"Bearer {server.token}",
+                "Accept": "text/event-stream",
+            },
+        )
+        timed_response = timed.getresponse()
+        assert timed_response.status == 200
+        assert timed_response.readline() == b"event: health\n"
+
+        indefinite.request(
+            "GET",
+            "/health?sse=1&lease_id=indefinite",
+            headers={
+                "Authorization": f"Bearer {server.token}",
+                "Accept": "text/event-stream",
+            },
+        )
+        indefinite_response = indefinite.getresponse()
+        assert indefinite_response.status == 200
+        assert indefinite_response.readline() == b"event: health\n"
+
+        while timed_response.readline() != b"event: lease_expired\n":
+            pass
+        deadline = time.monotonic() + 1
+        while server._active_leases != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server._active_leases == 1
+        assert not stopped.is_set()
+        status, payload, _ = request(
+            server,
+            "POST",
+            "/execute_python",
+            {"lease_id": "indefinite", "code": "1"},
+        )
+        assert status == 200
+        assert payload["result"] == {"code": "1"}
+
+        indefinite_response.close()
+        indefinite.close()
+        assert stopped.wait(1)
+    finally:
+        timed.close()
+        indefinite.close()
+        server.stop()
+        server.release_registration()
+
+
 def test_sse_idb_events_defers_hook_until_analysis_finishes(tmp_path: Path):
     server, backend = make_server(tmp_path)
     connection = HTTPConnection("127.0.0.1", server.port, timeout=3)

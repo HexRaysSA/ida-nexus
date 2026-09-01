@@ -99,6 +99,21 @@ status without confusing IDA's temporary suspension during GUI actions.
 `execute_python()` is stateless by default; pass `persist_globals=True` to keep
 a lease-scoped Python namespace between calls.
 
+Library leases are indefinite by default. A client that wants its own managed
+idalib lease released after inactivity can set `idle_timeout` without affecting
+other leases on the shared worker:
+
+```python
+options = DatabaseOpenOptions(idle_timeout=900)
+```
+
+The deadline is suspended while that lease has an active request and restarts
+when the request finishes. GUI and unmanaged-idalib handles ignore it.
+`keepalive` is separate: it delays worker shutdown only after a lease is released.
+MCP leases are also indefinite by default. Opt into idle release with
+`ida-nexus mcp --idle-timeout 900` or set
+`IDA_NEXUS_MCP_IDLE_TIMEOUT=900`; passing zero explicitly disables it.
+
 Database changes are available as a closeable, blocking iterator. Each item is
 one structured IDB hook event with a monotonically increasing `revision`, a
 nanosecond Unix `timestamp`, the `operation_id` and optional untrusted

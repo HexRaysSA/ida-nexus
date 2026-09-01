@@ -7,7 +7,12 @@ import json
 import sys
 from urllib.parse import urlparse
 
-from ida_nexus.mcp import serve_http, serve_stdio
+from ida_nexus.mcp import (
+    MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE,
+    _mcp_idle_timeout_from_environment,
+    serve_http,
+    serve_stdio,
+)
 
 
 def _report_claude_session(payload: dict[str, object]) -> dict[str, object]:
@@ -89,6 +94,20 @@ def _report_session_main(platform: str) -> int:
     return 0
 
 
+def _idle_timeout(value: str) -> float | None:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("idle timeout must be a number") from exc
+    if timeout == 0:
+        return None
+    if not timeout > 0 or timeout == float("inf"):
+        raise argparse.ArgumentTypeError(
+            "idle timeout must be positive and finite, or zero to disable"
+        )
+    return timeout
+
+
 def _http_target(transport: str) -> tuple[str, int]:
     url = urlparse(transport)
     if url.scheme not in {"http", "https"} or url.hostname is None or url.port is None:
@@ -120,6 +139,17 @@ def cli(argv: list[str] | None = None) -> int:
         help="Agent name to record in the MCP session trace.",
     )
     parser.add_argument(
+        "--idle-timeout",
+        type=_idle_timeout,
+        default=_mcp_idle_timeout_from_environment(),
+        help=(
+            "Release each managed idalib lease after this many seconds without "
+            "a database request; zero disables idle release. Defaults to no "
+            "timeout. Can also be set with "
+            f"{MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE}."
+        ),
+    )
+    parser.add_argument(
         "--report-session",
         choices=["claude", "codex"],
         help=argparse.SUPPRESS,
@@ -130,7 +160,11 @@ def cli(argv: list[str] | None = None) -> int:
         return _report_session_main(args.report_session)
 
     if args.transport == "stdio":
-        serve_stdio(database=args.database, agent=args.agent)
+        serve_stdio(
+            database=args.database,
+            agent=args.agent,
+            idle_timeout=args.idle_timeout,
+        )
         return 0
 
     try:
@@ -141,6 +175,7 @@ def cli(argv: list[str] | None = None) -> int:
     options = {
         "agent": args.agent,
         "database": args.database,
+        "idle_timeout": args.idle_timeout,
     }
 
     print("Server is running; press Ctrl+C to stop.", file=sys.stderr)

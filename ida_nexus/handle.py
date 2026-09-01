@@ -242,14 +242,31 @@ class DatabaseHandle:
         instance: DatabaseInstance,
         *,
         keepalive: float = 0.0,
+        idle_timeout: float | None = None,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> None:
         if not math.isfinite(keepalive) or not 0 <= keepalive <= MAX_KEEPALIVE_SECONDS:
             raise ValueError(
                 f"keepalive must be between 0 and {MAX_KEEPALIVE_SECONDS:g} seconds"
             )
+        if idle_timeout is not None and (
+            isinstance(idle_timeout, bool)
+            or not isinstance(idle_timeout, (int, float))
+            or not math.isfinite(idle_timeout)
+            or idle_timeout <= 0
+        ):
+            raise ValueError("idle_timeout must be a positive finite number or None")
         self.path = path
         self.keepalive = float(keepalive)
+        # Idle expiration is useful only for managed workers. GUI and directly
+        # launched unmanaged instances retain their lease until explicit close.
+        self.idle_timeout = (
+            float(idle_timeout)
+            if idle_timeout is not None
+            and instance.backend == "idalib"
+            and instance.managed
+            else None
+        )
         self._lease_id = uuid.uuid4().hex
         self._event_origin_id = _event_origin_id(self._lease_id)
         self._on_disconnect = on_disconnect
@@ -283,6 +300,7 @@ class DatabaseHandle:
         *,
         path: str | None = None,
         keepalive: float = 0.0,
+        idle_timeout: float | None = None,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> Self:
         """Attach directly to one discovered instance without re-resolving it."""
@@ -290,12 +308,13 @@ class DatabaseHandle:
         requested_path = path or instance.exe_path or instance.idb_path
         if not requested_path:
             raise ValueError("instance has no attachable database path")
-        return cls(
-            requested_path,
-            instance,
-            keepalive=keepalive,
-            on_disconnect=on_disconnect,
-        )
+        constructor_options: dict[str, Any] = {
+            "keepalive": keepalive,
+            "on_disconnect": on_disconnect,
+        }
+        if idle_timeout is not None:
+            constructor_options["idle_timeout"] = idle_timeout
+        return cls(requested_path, instance, **constructor_options)
 
     @classmethod
     def open(
@@ -343,24 +362,28 @@ class DatabaseHandle:
 
         instance = resolve()
         try:
-            return cls.attach(
-                instance,
-                path=path,
-                keepalive=options.keepalive,
-                on_disconnect=on_disconnect,
-            )
+            attach_options: dict[str, Any] = {
+                "path": path,
+                "keepalive": options.keepalive,
+                "on_disconnect": on_disconnect,
+            }
+            if options.idle_timeout is not None:
+                attach_options["idle_timeout"] = options.idle_timeout
+            return cls.attach(instance, **attach_options)
         except NexusConnectionError:
             # The worker may cross its zero-lease shutdown boundary between
             # resolve and the SSE handshake. Resolve once more as promised by
             # the instance lifecycle contract.
             time.sleep(0.05)
             replacement = resolve()
-            return cls.attach(
-                replacement,
-                path=path,
-                keepalive=options.keepalive,
-                on_disconnect=on_disconnect,
-            )
+            attach_options = {
+                "path": path,
+                "keepalive": options.keepalive,
+                "on_disconnect": on_disconnect,
+            }
+            if options.idle_timeout is not None:
+                attach_options["idle_timeout"] = options.idle_timeout
+            return cls.attach(replacement, **attach_options)
 
     @property
     def instance(self) -> DatabaseInstance:
@@ -415,9 +438,15 @@ class DatabaseHandle:
     ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse, socket.socket]:
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=10.0)
         try:
+            lease_path = (
+                f"/health?sse=1&lease_id={self._lease_id}"
+                f"&keepalive={self.keepalive:g}"
+            )
+            if self.idle_timeout is not None:
+                lease_path += f"&idle_timeout={self.idle_timeout:g}"
             connection.request(
                 "GET",
-                f"/health?sse=1&lease_id={self._lease_id}&keepalive={self.keepalive:g}",
+                lease_path,
                 headers={
                     "Accept": "text/event-stream",
                     "Authorization": f"Bearer {entry._token}",
@@ -480,10 +509,35 @@ class DatabaseHandle:
         with self._lock:
             response = self._lease_response
         reason = "database connection closed"
+        event_name: bytes | None = None
+        event_data: list[bytes] = []
         try:
             if response is not None:
-                while not self._closed.is_set() and response.readline():
-                    pass
+                while not self._closed.is_set():
+                    line = response.readline()
+                    if not line:
+                        break
+                    line = line.rstrip(b"\r\n")
+                    if not line:
+                        if event_name == b"lease_expired":
+                            try:
+                                payload = json.loads(b"\n".join(event_data))
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                payload = None
+                            if isinstance(payload, dict):
+                                timeout = payload.get("idle_timeout")
+                                if isinstance(timeout, (int, float)):
+                                    reason = (
+                                        "database lease expired after "
+                                        f"{float(timeout):g} seconds of inactivity"
+                                    )
+                        event_name = None
+                        event_data = []
+                        continue
+                    if line.startswith(b"event:"):
+                        event_name = line[len(b"event:") :].lstrip()
+                    elif line.startswith(b"data:"):
+                        event_data.append(line[len(b"data:") :].lstrip())
         except (OSError, ValueError, http.client.HTTPException) as exc:
             reason = f"database connection failed: {exc}"
         if self._closed.is_set():
@@ -692,7 +746,7 @@ class DatabaseHandle:
         background after publication.
         """
         result = self._request(
-            "/poll_autoanalysis",
+            f"/poll_autoanalysis?lease_id={self._lease_id}",
             {},
             method="GET",
             timeout=5.0,

@@ -26,7 +26,12 @@ _AUTOANALYSIS_SCHEDULER_YIELD_SECONDS = 0.001
 @dataclass
 class _Lease:
     keepalive: float
+    idle_timeout: float | None
     stop: threading.Event
+    active_requests: int = 0
+    idle_deadline: float | None = None
+    expiring: bool = False
+    stop_reason: str | None = None
 
 
 class NexusBackend(Protocol):
@@ -315,6 +320,22 @@ class NexusHTTPServer:
             with self._activity:
                 while not self._draining:
                     now = time.monotonic()
+                    next_wakeup: float | None = None
+                    for lease in self._leases.values():
+                        deadline = lease.idle_deadline
+                        if lease.expiring or deadline is None:
+                            continue
+                        if lease.active_requests == 0 and deadline <= now:
+                            # Keep the lease installed until its SSE handler has
+                            # sent the reason and run the ordinary detach path.
+                            # New requests are rejected at this boundary.
+                            lease.expiring = True
+                            lease.stop_reason = "idle_timeout"
+                            lease.stop.set()
+                            continue
+                        if next_wakeup is None or deadline < next_wakeup:
+                            next_wakeup = deadline
+
                     shutdown_at = self._shutdown_at
                     eligible = (
                         self._active_leases == 0
@@ -326,9 +347,13 @@ class NexusHTTPServer:
                         if remaining <= 0:
                             self._draining = True
                             break
-                        self._activity.wait(timeout=min(remaining, 1.0))
-                    else:
-                        self._activity.wait(timeout=1.0)
+                        if next_wakeup is None or shutdown_at < next_wakeup:
+                            next_wakeup = shutdown_at
+
+                    wait_timeout = 1.0
+                    if next_wakeup is not None:
+                        wait_timeout = min(wait_timeout, max(0.0, next_wakeup - now))
+                    self._activity.wait(timeout=wait_timeout)
                     if self._stream_stop.is_set():
                         return
                 if not self._draining or self._stream_stop.is_set():
@@ -344,11 +369,25 @@ class NexusHTTPServer:
                     logger.exception("Nexus shutdown callback failed")
             return
 
-    def _lease_opened(self, lease_id: str, keepalive: float) -> _Lease | None:
+    def _lease_opened(
+        self,
+        lease_id: str,
+        keepalive: float,
+        idle_timeout: float | None = None,
+    ) -> _Lease | None:
         with self._activity:
             if self._draining or self._shutdown_requested or lease_id in self._leases:
                 return None
-            lease = _Lease(keepalive=keepalive, stop=threading.Event())
+            lease = _Lease(
+                keepalive=keepalive,
+                idle_timeout=idle_timeout,
+                stop=threading.Event(),
+                idle_deadline=(
+                    time.monotonic() + idle_timeout
+                    if idle_timeout is not None
+                    else None
+                ),
+            )
             self._leases[lease_id] = lease
             self._active_leases = len(self._leases)
             self._shutdown_at = None
@@ -414,16 +453,30 @@ class NexusHTTPServer:
                 raise APIError(
                     "instance_draining", "The instance is shutting down", status=503
                 )
-            if lease_id is not None and lease_id not in self._leases:
+            lease = self._leases.get(lease_id) if lease_id is not None else None
+            if lease_id is not None and (lease is None or lease.expiring):
                 raise APIError(
                     "lease_released", "The client lease is no longer active", status=409
                 )
+            if lease is not None:
+                lease.active_requests += 1
+                lease.idle_deadline = None
             self._active_requests += 1
+            self._activity.notify_all()
 
-    def _request_finished(self) -> None:
+    def _request_finished(self, lease_id: str | None = None) -> None:
         with self._activity:
             if self._active_requests > 0:
                 self._active_requests -= 1
+            lease = self._leases.get(lease_id) if lease_id is not None else None
+            if lease is not None and lease.active_requests > 0:
+                lease.active_requests -= 1
+                if (
+                    lease.active_requests == 0
+                    and not lease.expiring
+                    and lease.idle_timeout is not None
+                ):
+                    lease.idle_deadline = time.monotonic() + lease.idle_timeout
             self._activity.notify_all()
 
     def _run_operation(
@@ -571,7 +624,9 @@ class NexusHTTPServer:
         return {"status": "ok", **entry.health_identity()}
 
     @staticmethod
-    def _lease_parameters(parameters: dict[str, list[str]]) -> tuple[str, float]:
+    def _lease_parameters(
+        parameters: dict[str, list[str]],
+    ) -> tuple[str, float, float | None]:
         values = parameters.get("lease_id")
         lease_id = values[0] if values and len(values) == 1 else uuid.uuid4().hex
         if not lease_id or len(lease_id) > 128:
@@ -593,11 +648,32 @@ class NexusHTTPServer:
                 "invalid_keepalive",
                 f"keepalive must be between 0 and {MAX_KEEPALIVE_SECONDS:g} seconds",
             )
-        return lease_id, keepalive
+        idle_timeout_values = parameters.get("idle_timeout")
+        if idle_timeout_values is None:
+            idle_timeout = None
+        elif len(idle_timeout_values) != 1:
+            raise APIError(
+                "invalid_idle_timeout",
+                "idle_timeout must be specified at most once",
+            )
+        else:
+            try:
+                idle_timeout = float(idle_timeout_values[0])
+            except (TypeError, ValueError) as exc:
+                raise APIError(
+                    "invalid_idle_timeout",
+                    "idle_timeout must be a positive number",
+                ) from exc
+            if not math.isfinite(idle_timeout) or idle_timeout <= 0:
+                raise APIError(
+                    "invalid_idle_timeout",
+                    "idle_timeout must be a positive finite number",
+                )
+        return lease_id, keepalive, idle_timeout
 
     def _lease_response(self, parameters: dict[str, list[str]]) -> HTTPResponse:
-        lease_id, keepalive = self._lease_parameters(parameters)
-        lease = self._lease_opened(lease_id, keepalive)
+        lease_id, keepalive, idle_timeout = self._lease_parameters(parameters)
+        lease = self._lease_opened(lease_id, keepalive, idle_timeout)
         if lease is None:
             return self._failure(
                 APIError(
@@ -617,6 +693,18 @@ class NexusHTTPServer:
                 if self._stream_stop.is_set():
                     return
                 file.write(b": keepalive\n\n")
+                file.flush()
+            if lease.stop_reason == "idle_timeout" and lease.idle_timeout is not None:
+                expiration = json.dumps(
+                    {
+                        "reason": "idle_timeout",
+                        "idle_timeout": lease.idle_timeout,
+                    },
+                    separators=(",", ":"),
+                )
+                file.write(
+                    f"event: lease_expired\ndata: {expiration}\n\n".encode()
+                )
                 file.flush()
 
         return HTTPResponse(
@@ -866,19 +954,31 @@ class NexusHTTPServer:
                     after_send=finish_release,
                 )
 
-            payload = (
-                self._decode_object(body)
-                if method == "POST"
-                and path
-                in {
-                    "/wait_autoanalysis",
-                    "/execute_python",
-                    "/cancel_operation",
-                    "/save_database",
-                    "/shutdown_database",
-                }
-                else {}
-            )
+            if method == "GET" and path == "/poll_autoanalysis":
+                parameters = parse_qs(query, keep_blank_values=True)
+                lease_values = parameters.get("lease_id")
+                if lease_values is None:
+                    payload = {}
+                else:
+                    payload = {
+                        "lease_id": (
+                            lease_values[0] if len(lease_values) == 1 else ""
+                        )
+                    }
+            else:
+                payload = (
+                    self._decode_object(body)
+                    if method == "POST"
+                    and path
+                    in {
+                        "/wait_autoanalysis",
+                        "/execute_python",
+                        "/cancel_operation",
+                        "/save_database",
+                        "/shutdown_database",
+                    }
+                    else {}
+                )
             lease_id = self._payload_lease_id(payload)
             self._request_started(lease_id)
             try:
@@ -962,7 +1062,7 @@ class NexusHTTPServer:
                     )
                 return json_response(404, {"ok": False, "error": "Not Found"})
             finally:
-                self._request_finished()
+                self._request_finished(lease_id)
         except APIError as exc:
             return self._failure(exc)
         except Exception as exc:

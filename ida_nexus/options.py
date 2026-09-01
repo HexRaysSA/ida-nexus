@@ -21,6 +21,9 @@ class DatabaseOpenOptions:
     whether that worker starts analysis asynchronously after publication
     (the default); an explicit ``wait_autoanalysis()`` can start it later
     either way.
+    ``idle_timeout`` optionally releases only this client's managed-idalib
+    lease after inactivity; it is ignored for GUI and unmanaged instances.
+    ``keepalive`` instead delays worker shutdown after the lease is released.
     ``image_base`` is a byte address and must be 16-byte aligned.
     """
 
@@ -28,6 +31,7 @@ class DatabaseOpenOptions:
     startup_timeout: float = 120.0
     output_database: str | Path | None = None
     keepalive: float = 0.0
+    idle_timeout: float | None = None
     auto_analysis: bool = True
     image_base: int | None = None
     new_database: bool = False
@@ -64,6 +68,13 @@ class DatabaseOpenOptions:
             raise ValueError(
                 f"keepalive must be between 0 and {MAX_KEEPALIVE_SECONDS:g} seconds"
             )
+        if self.idle_timeout is not None and (
+            isinstance(self.idle_timeout, bool)
+            or not isinstance(self.idle_timeout, (int, float))
+            or not math.isfinite(self.idle_timeout)
+            or self.idle_timeout <= 0
+        ):
+            raise ValueError("idle_timeout must be a positive finite number or None")
         if self.image_base is not None:
             if isinstance(self.image_base, bool) or self.image_base < 0:
                 raise ValueError("image_base must be a non-negative byte address")

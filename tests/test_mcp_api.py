@@ -3,6 +3,7 @@ from unittest.mock import Mock
 import pytest
 
 from ida_nexus import mcp as mcp_api
+from ida_nexus.cli import mcp as mcp_cli
 from ida_nexus.manager import DatabaseManager
 
 
@@ -83,6 +84,49 @@ def test_programmatic_http_server_rejects_invalid_address(
 ) -> None:
     with pytest.raises(ValueError):
         mcp_api.serve_http(host, port)
+
+
+@pytest.mark.parametrize(
+    ("environment_value", "expected"),
+    [(None, None), ("0", None), ("45", 45.0)],
+)
+def test_mcp_cli_idle_timeout_environment_default(
+    monkeypatch: pytest.MonkeyPatch,
+    environment_value: str | None,
+    expected: float | None,
+) -> None:
+    if environment_value is None:
+        monkeypatch.delenv(
+            mcp_api.MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE,
+            raising=False,
+        )
+    else:
+        monkeypatch.setenv(
+            mcp_api.MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE,
+            environment_value,
+        )
+    serve = Mock()
+    monkeypatch.setattr(mcp_cli, "serve_stdio", serve)
+
+    assert mcp_cli.cli(["--transport", "stdio"]) == 0
+    serve.assert_called_once_with(
+        database=None,
+        agent=None,
+        idle_timeout=expected,
+    )
+
+
+def test_mcp_cli_argument_overrides_idle_timeout_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(mcp_api.MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE, "45")
+    serve = Mock()
+    monkeypatch.setattr(mcp_cli, "serve_stdio", serve)
+
+    assert mcp_cli.cli(
+        ["--transport", "stdio", "--idle-timeout", "120"]
+    ) == 0
+    assert serve.call_args.kwargs["idle_timeout"] == 120.0
 
 
 def test_tool_rejects_builtin_name_collision() -> None:

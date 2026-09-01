@@ -14,6 +14,7 @@ import atexit
 import inspect
 import ipaddress
 import json
+import math
 import os
 import signal
 import sys
@@ -45,10 +46,13 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE = "IDA_NEXUS_MCP_IDLE_TIMEOUT"
+
 MCP_ENVIRONMENT_VARIABLES = (
     "IDA_NEXUS_ID",
     "IDAUSR",
     "IDA_NEXUS_STATE_DIR",
+    MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE,
 )
 
 
@@ -81,6 +85,29 @@ from ida_nexus.paths import _get_idausr_dir
 SESSIONS_DIR = get_state_dir() / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 360
+def _mcp_idle_timeout_from_environment() -> float | None:
+    raw_value = os.environ.get(MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE)
+    if raw_value is None or not raw_value.strip():
+        return None
+    try:
+        timeout = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE} must be a number"
+        ) from exc
+    if timeout == 0:
+        return None
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError(
+            f"{MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE} must be positive and "
+            "finite, or zero to disable"
+        )
+    return timeout
+
+
+# MCP leases are indefinite unless the CLI argument or its environment-variable
+# equivalent explicitly opts into managed-worker idle release.
+MCP_IDLE_TIMEOUT_SECONDS = _mcp_idle_timeout_from_environment()
 
 PACKAGE_VERSION = version("ida-nexus")
 mcp = McpServer("ida", version=PACKAGE_VERSION)
@@ -279,6 +306,7 @@ DATABASE_MANAGER = DatabaseManager(
     on_event=_trace_database_event,
     open_timeout=OPEN_TIMEOUT_SECONDS,
     execute_timeout=EXECUTE_TIMEOUT_SECONDS,
+    idle_timeout=MCP_IDLE_TIMEOUT_SECONDS,
 )
 
 _TRACE_LIFECYCLE_LOCK = threading.Lock()
@@ -343,6 +371,7 @@ def serve_http(
     agent: str | None = None,
     path_prefix: str = "",
     background: bool = True,
+    idle_timeout: float | None = MCP_IDLE_TIMEOUT_SECONDS,
 ) -> None:
     """Serve Streamable HTTP in the background or until SIGINT/SIGTERM."""
 
@@ -352,19 +381,19 @@ def serve_http(
         raise RuntimeError("the Nexus HTTP MCP server is already running")
 
     manager_options = dict(database_manager_kwargs or {})
-    if database_manager_class is None and manager_options:
-        raise ValueError(
-            "database_manager_kwargs requires database_manager_class"
-        )
     if "on_event" in manager_options:
         raise ValueError("on_event is managed by the Nexus MCP server")
+    manager_class = database_manager_class or DatabaseManager
+    if database_manager_class is None:
+        manager_options.setdefault("idle_timeout", idle_timeout)
+        manager_options.setdefault("open_timeout", OPEN_TIMEOUT_SECONDS)
+        manager_options.setdefault("execute_timeout", EXECUTE_TIMEOUT_SECONDS)
 
     previous_manager = DATABASE_MANAGER
-    if database_manager_class is not None:
-        DATABASE_MANAGER = database_manager_class(
-            on_event=_trace_database_event,
-            **manager_options,
-        )
+    DATABASE_MANAGER = manager_class(
+        on_event=_trace_database_event,
+        **manager_options,
+    )
 
     try:
         _unset_empty_environment_variables()
@@ -377,6 +406,7 @@ def serve_http(
             DATABASE_MANAGER = previous_manager
         raise
 
+    previous_manager.shutdown()
     _HTTP_SERVER_STARTED = True
     _start_mcp_trace(
         f"http://{host}:{port}{mcp.path_prefix}/mcp",
@@ -805,8 +835,27 @@ def serve_stdio(
     *,
     database: str | None = None,
     agent: str | None = None,
+    database_manager_class: type[DatabaseManager] | None = None,
+    database_manager_kwargs: Mapping[str, Any] | None = None,
+    idle_timeout: float | None = MCP_IDLE_TIMEOUT_SECONDS,
 ) -> None:
     """Run the MCP server over stdio until the peer closes its input."""
+
+    global DATABASE_MANAGER
+    manager_options = dict(database_manager_kwargs or {})
+    if "on_event" in manager_options:
+        raise ValueError("on_event is managed by the Nexus MCP server")
+    manager_class = database_manager_class or DatabaseManager
+    if database_manager_class is None:
+        manager_options.setdefault("idle_timeout", idle_timeout)
+        manager_options.setdefault("open_timeout", OPEN_TIMEOUT_SECONDS)
+        manager_options.setdefault("execute_timeout", EXECUTE_TIMEOUT_SECONDS)
+    previous_manager = DATABASE_MANAGER
+    DATABASE_MANAGER = manager_class(
+        on_event=_trace_database_event,
+        **manager_options,
+    )
+    previous_manager.shutdown()
 
     _unset_empty_environment_variables()
     _install_server_shutdown_handlers()

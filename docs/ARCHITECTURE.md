@@ -106,6 +106,10 @@ Registration order is an invariant:
 The fixed grace period protects only the interval between publication and the
 first lease. Afterward, a managed worker begins idle shutdown immediately when
 its final lease disappears, unless that lease requested a bounded keepalive.
+A managed-worker lease may also opt into its own idle timeout. Its deadline is
+suspended while lease-owned requests are active and reset after they finish;
+expiration releases only that lease, so an indefinite or active peer lease
+continues to retain the shared worker.
 The watchdog marks the service as draining, closes lease streams and the
 listener, and asks the idalib main loop to stop. The registry record and its
 lifetime lock remain together while the worker saves/closes the IDB, so a
@@ -196,7 +200,7 @@ Important routes are:
 | Route | Purpose |
 |---|---|
 | `GET /health` | Authenticated record identity and liveness probe. |
-| `GET /health?sse=1` | Persistent client lease with periodic heartbeat and optional keepalive. |
+| `GET /health?sse=1` | Persistent client lease with periodic heartbeat, optional post-release keepalive, and optional per-lease idle timeout. |
 | `GET /idb_events` | Structured database-operation events after initial autoanalysis finishes. |
 | `POST /release_lease` | Idempotently release one identified client lease. |
 | `POST /execute_python` | Execute Nexus Python against the open database. |
@@ -243,14 +247,14 @@ operation.
 
 ## Protocol contract and versioning
 
-`PROTOCOL_VERSION` is currently `7`. It is an exact compatibility version for
+`PROTOCOL_VERSION` is currently `8`. It is an exact compatibility version for
 the private discovery registry and per-database HTTP API. There is no downgrade
 or highest-common-version negotiation: a scanner whose local version differs
 from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
 deliberate—starting a replacement could corrupt an IDB already owned by a peer
 that the scanner does not understand.
 
-Protocol version 7 consists of the following interoperable contracts.
+Protocol version 8 consists of the following interoperable contracts.
 
 ### Discovery contract
 
@@ -284,14 +288,14 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | Route | Request and response contract |
 |---|---|
 | `GET /health` | Raw health identity object described above. |
-| `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
+| `GET /health?sse=1` | `text/event-stream`; accepts `lease_id`, bounded post-release `keepalive`, and optional positive `idle_timeout` query values. It emits one initial `health` event and heartbeat comments. A timed managed-idalib lease emits `lease_expired` with its timeout before disconnecting when possible. |
 | `GET /idb_events` | `text/event-stream`; accepts subscribers immediately but installs its structured IDB hook only after initial autoanalysis completes. Each `idb_changed` payload is one event containing `event_name`, nanosecond Unix `timestamp`, monotonically increasing `revision`, event-specific fields, and nullable `origin_id`, `operation_id`, and `operation_label`. `origin_id` is an opaque, one-way-derived identity for the executing lease; it supports handle-local event recognition without disclosing the control-capable `lease_id`. The GUI plugin uses `IDA GUI` as the operation label outside `execute_python()` calls, covering direct UI actions and GUI-process background work. The hook is removed after the final subscriber disconnects. A subscriber that exceeds its bounded queue is disconnected rather than receiving an incomplete history. |
 | `POST /release_lease` | `{lease_id}`; idempotently detaches that lease and returns `{"released":true,"shutdown_pending":bool}`. A true `shutdown_pending` commits final zero-keepalive managed shutdown so the client may wait for the lifetime lock to be released. |
 | `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, operation_label?, persist_globals?, filename?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. The optional operation label is opaque display text containing 1 to 1024 characters and at least one non-whitespace character. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `POST /shutdown_database` | `{lease_id, save}`; the active lease must be exclusive and own a managed idalib worker. Success is `{"ok":true,"result":{"shutting_down":true,"save":bool}}`, after which teardown uses `Database.close(save=save)`. |
-| `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object; observing it never enables or advances analysis. `status` is `running`, `complete`, or `disabled`. A persistently disabled GUI settles the barrier as `disabled` with `complete: true`; temporary GUI-action suspension does not. |
+| `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object; accepts an optional `lease_id` query value so handle polling counts as lease activity. Observing it never enables or advances analysis. `status` is `running`, `complete`, or `disabled`. A persistently disabled GUI settles the barrier as `disabled` with `complete: true`; temporary GUI-action suspension does not. |
 | `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts optional `timeout`, `lease_id`, and `operation_id` fields. An omitted timeout waits without a deadline. An explicit wait advances a `disabled` barrier by temporarily enabling the runtime analyzer without changing the persistent GUI setting. |
 
 Request-owned cancellation requires registry protocol version 3. Version 4 adds
@@ -299,7 +303,8 @@ opt-in lease-scoped persistent Python namespaces. Version 5 requires execution
 results to be directly JSON-serializable and adds exclusive managed-worker
 shutdown. Version 6 reports when explicit lease release commits final managed
 shutdown. Version 7 distinguishes a persistently disabled GUI autoanalyzer from
-temporary runtime suspension. These exact versions prevent a new client from
+temporary runtime suspension. Version 8 adds opt-in, server-enforced per-lease
+idle expiration for managed idalib workers. These exact versions prevent a new client from
 silently attaching to a GUI plugin or worker that cannot provide the lifecycle
 and execution semantics on which it relies.
 
@@ -360,7 +365,9 @@ protocol bump; it must not silently reinterpret an existing field.
 ## Shared leases and managed shutdown
 
 Each `DatabaseHandle` owns one authenticated SSE lease connection in addition
-to its on-demand RPC connection. `subscribe_idb_events()` opens an optional,
+to its on-demand RPC connection. A handle is indefinite by default; a positive
+`idle_timeout` opts only that handle into managed-worker idle expiration. GUI
+and unmanaged-idalib handles ignore the option. `subscribe_idb_events()` opens an optional,
 closeable SSE iterator whose revisions signal consumers to refresh cached IDB
 data. Multiple handles, MCP servers, and agents may share the same instance.
 Closing one handle closes only its own connections and event subscriptions.
@@ -375,6 +382,11 @@ publication and its first lease. Established leases default to zero keepalive,
 so their explicit release or detected disappearance starts shutdown without an
 additional grace period. Low-level clients may request a bounded keepalive when
 opening a lease to retain an idle worker for repeated short-lived invocations.
+`keepalive` starts only after release; `idle_timeout` instead determines when an
+otherwise-live managed-worker lease releases itself. Lease heartbeats, registry
+probes, other clients, event streams, and background analysis do not reset that
+deadline. A lease-owned request suspends expiration until it finishes and then
+starts a fresh timeout period.
 
 Each RPC carries its owning lease identity. An execution that explicitly opts
 into persistence uses a lease-scoped global namespace, giving one handle
@@ -447,7 +459,9 @@ IDA to unwind safely before abandoning the MCP request without a response.
 On stdio EOF, SIGINT, SIGTERM, or normal interpreter exit, the MCP server
 releases all handles. Other agents continue uninterrupted. If the released
 lease was the last lease on a managed worker, that worker performs its own
-shutdown.
+shutdown. MCP and direct library leases remain indefinite unless they opt in.
+The MCP accepts `--idle-timeout` or `IDA_NEXUS_MCP_IDLE_TIMEOUT`; zero disables
+idle release explicitly.
 
 ## Semantic sessions and agent metadata
 

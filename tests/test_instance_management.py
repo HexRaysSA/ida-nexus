@@ -317,14 +317,28 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
         return entry
 
     class CapturingHandle(DatabaseHandle):
-        def __init__(self, path, resolved_entry, keepalive=0, on_disconnect=None):
-            self.opened = (path, resolved_entry, keepalive, on_disconnect)
+        def __init__(
+            self,
+            path,
+            resolved_entry,
+            keepalive=0,
+            idle_timeout=None,
+            on_disconnect=None,
+        ):
+            self.opened = (
+                path,
+                resolved_entry,
+                keepalive,
+                idle_timeout,
+                on_disconnect,
+            )
 
     monkeypatch.setattr(client_mod, "resolve_instance", fake_resolve)
     handle = CapturingHandle.open(
         "firmware.bin",
         options=DatabaseOpenOptions(
             output_database="firmware.i64",
+            idle_timeout=30,
             auto_analysis=True,
             image_base=0x8000,
             new_database=True,
@@ -352,7 +366,7 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
         ),
     )
 
-    assert handle.opened[:2] == ("firmware.bin", entry)
+    assert handle.opened[:4] == ("firmware.bin", entry, 0.0, 30)
     assert captured["path"] == "firmware.bin"
     assert captured["options"] == {
         "spawn": True,
@@ -2115,6 +2129,61 @@ def test_draining_owner_remains_discoverable_until_database_close(
     # The lifecycle owner calls this only after database.close()/unhook().
     server.release_registration()
     assert not record_path.exists()
+
+
+def test_handle_idle_timeout_disconnects_only_managed_workers(tmp_path: Path) -> None:
+    stopped = threading.Event()
+    server = NexusHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
+        AnalysisState(),
+        REGISTRY_DIR,
+        lease_grace=30,
+        heartbeat_interval=0.02,
+        on_shutdown=stopped.set,
+    )
+    server.start()
+    assert server.entry is not None
+    reasons: list[str] = []
+    handle = DatabaseHandle.attach(
+        server.entry,
+        idle_timeout=0.1,
+        on_disconnect=lambda _handle, reason: reasons.append(reason),
+    )
+    try:
+        deadline = time.monotonic() + 1
+        while handle.connected and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not handle.connected
+        assert reasons == [
+            "database lease expired after 0.1 seconds of inactivity"
+        ]
+        assert stopped.wait(1)
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
+
+
+def test_handle_idle_timeout_is_ignored_for_gui(tmp_path: Path) -> None:
+    server = NexusHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        AnalysisState(),
+        REGISTRY_DIR,
+        heartbeat_interval=0.02,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle.attach(server.entry, idle_timeout=0.05)
+    try:
+        time.sleep(0.1)
+        assert handle.connected
+        assert handle.idle_timeout is None
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
 
 
 def test_handle_keepalive_retains_idle_managed_worker(tmp_path: Path) -> None:

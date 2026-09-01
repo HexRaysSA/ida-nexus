@@ -22,7 +22,7 @@ HOST = "127.0.0.1"
 REGISTRY_DIR = STATE_DIR / "instances"
 SPAWN_DIR = STATE_DIR / "spawn"
 LOG_DIR = STATE_DIR / "logs"
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 DEFAULT_TIMEOUT = 1.0
 BackendName = Literal["gui", "idalib"]
 
