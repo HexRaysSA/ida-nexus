@@ -11,7 +11,12 @@ from typing import Any, Self
 
 from ._registry import HOST, DatabaseInstance, _event_origin_id
 from ._resolver import resolve_instance
+from .database_state import (
+    DatabaseRecovery,
+    probe_database_state,
+)
 from .errors import (
+    DatabaseCrashedError,
     DatabaseDisconnectedError,
     NexusConnectionError,
     RemoteError,
@@ -243,6 +248,7 @@ class DatabaseHandle:
         *,
         keepalive: float = 0.0,
         idle_timeout: float | None = None,
+        recovery: DatabaseRecovery = "none",
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> None:
         if not math.isfinite(keepalive) or not 0 <= keepalive <= MAX_KEEPALIVE_SECONDS:
@@ -256,8 +262,11 @@ class DatabaseHandle:
             or idle_timeout <= 0
         ):
             raise ValueError("idle_timeout must be a positive finite number or None")
+        if recovery not in ("none", "repaired", "restored"):
+            raise ValueError("recovery must be 'none', 'repaired', or 'restored'")
         self.path = path
         self.keepalive = float(keepalive)
+        self.recovery = recovery
         # Idle expiration is useful only for managed workers. GUI and directly
         # launched unmanaged instances retain their lease until explicit close.
         self.idle_timeout = (
@@ -301,6 +310,7 @@ class DatabaseHandle:
         path: str | None = None,
         keepalive: float = 0.0,
         idle_timeout: float | None = None,
+        recovery: DatabaseRecovery = "none",
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> Self:
         """Attach directly to one discovered instance without re-resolving it."""
@@ -311,6 +321,7 @@ class DatabaseHandle:
         constructor_options: dict[str, Any] = {
             "keepalive": keepalive,
             "on_disconnect": on_disconnect,
+            "recovery": recovery,
         }
         if idle_timeout is not None:
             constructor_options["idle_timeout"] = idle_timeout
@@ -327,6 +338,15 @@ class DatabaseHandle:
         """Attach to a shared instance, spawning a configured worker if needed."""
 
         options = options or DatabaseOpenOptions()
+        file_state = probe_database_state(
+            path,
+            output_database=options.output_database,
+        )
+        recovery: DatabaseRecovery = "none"
+        if file_state["state"] == "crashed" and not options.new_database:
+            recovery = (
+                "restored" if file_state["packed_database_exists"] else "repaired"
+            )
 
         def resolve() -> DatabaseInstance:
             return resolve_instance(
@@ -366,6 +386,7 @@ class DatabaseHandle:
                 "path": path,
                 "keepalive": options.keepalive,
                 "on_disconnect": on_disconnect,
+                "recovery": recovery,
             }
             if options.idle_timeout is not None:
                 attach_options["idle_timeout"] = options.idle_timeout
@@ -380,6 +401,7 @@ class DatabaseHandle:
                 "path": path,
                 "keepalive": options.keepalive,
                 "on_disconnect": on_disconnect,
+                "recovery": recovery,
             }
             if options.idle_timeout is not None:
                 attach_options["idle_timeout"] = options.idle_timeout
@@ -439,8 +461,7 @@ class DatabaseHandle:
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=10.0)
         try:
             lease_path = (
-                f"/health?sse=1&lease_id={self._lease_id}"
-                f"&keepalive={self.keepalive:g}"
+                f"/health?sse=1&lease_id={self._lease_id}&keepalive={self.keepalive:g}"
             )
             if self.idle_timeout is not None:
                 lease_path += f"&idle_timeout={self.idle_timeout:g}"
@@ -505,6 +526,11 @@ class DatabaseHandle:
         if old_connection is not None:
             old_connection.close()
 
+    @staticmethod
+    def _crashed_database_state(entry: DatabaseInstance) -> dict[str, Any] | None:
+        state = probe_database_state(entry.idb_path)
+        return state if state["state"] == "crashed" else None
+
     def _monitor_lease(self) -> None:
         with self._lock:
             response = self._lease_response
@@ -542,6 +568,12 @@ class DatabaseHandle:
             reason = f"database connection failed: {exc}"
         if self._closed.is_set():
             return
+        crash_state = self._crashed_database_state(self.instance)
+        if crash_state is not None:
+            reason = (
+                "database process crashed and left a dirty unpacked database at "
+                f"{crash_state['id0_path']}"
+            )
         self._mark_disconnected(reason)
 
     def _mark_disconnected(self, reason: str) -> None:
@@ -665,6 +697,14 @@ class DatabaseHandle:
                 # Do not retry automatically: a POST may have executed before
                 # the connection failed. The next operation gets a fresh socket.
                 self._discard_rpc_connection(connection)
+                crash_state = self._crashed_database_state(entry)
+                if crash_state is not None:
+                    raise DatabaseCrashedError(
+                        "database process crashed while handling the request and left "
+                        f"a dirty unpacked database at {crash_state['id0_path']}; "
+                        "open a new handle to recover it",
+                        crash_state,
+                    ) from exc
                 raise NexusConnectionError(f"Nexus request failed: {exc}") from exc
             finally:
                 if operation_id is not None:
@@ -711,6 +751,7 @@ class DatabaseHandle:
         operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
+        flush_database: bool = False,
     ) -> PythonExecutionResult:
         """Execute Python with optional display attribution.
 
@@ -721,6 +762,7 @@ class DatabaseHandle:
         payload: dict[str, Any] = {
             "code": code,
             "persist_globals": persist_globals,
+            "flush_database": flush_database,
         }
         if operation_label is not None:
             payload["operation_label"] = operation_label

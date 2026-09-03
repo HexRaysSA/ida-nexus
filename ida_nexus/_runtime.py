@@ -12,7 +12,7 @@ import traceback
 import warnings
 from collections import deque
 from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
 from typing import Any
 from weakref import WeakSet
@@ -203,6 +203,7 @@ class _DeadlineScheduler:
 
 
 _deadline_scheduler = _DeadlineScheduler()
+
 
 def _protect_operation_interrupt(module: ast.Module) -> None:
     """Keep submitted exception handlers from consuming Nexus cancellation."""
@@ -780,6 +781,7 @@ class IDARuntime:
         operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
+        flush_database: bool = False,
     ) -> PythonExecutionResult:
         import ida_domain
 
@@ -787,6 +789,13 @@ class IDARuntime:
             filename = USER_CODE_FILENAME
 
         def execute() -> Any:
+            if flush_database:
+                # Flushing is a best-effort durability hint. Some license tiers
+                # reject it; user code must still run in that configuration.
+                with suppress(Exception):
+                    import ida_loader
+
+                    ida_loader.flush_buffers()
             hook = self._idb_change_hook
             previous_operation: tuple[str | None, str | None, str | None] | None = None
             if hook is not None:

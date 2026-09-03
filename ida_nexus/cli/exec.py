@@ -19,6 +19,7 @@ def exec(
     json_mode: bool,
     *,
     operation_label: str,
+    flush_database: bool = False,
 ) -> bool:
     try:
         result = handle.execute_python(
@@ -26,6 +27,7 @@ def exec(
             operation_label=operation_label,
             persist_globals=True,
             filename=filename,
+            flush_database=flush_database,
         )
     except RemoteError as e:
         if stdout := e.details.get("stdout"):
@@ -65,7 +67,7 @@ def exec(
     return True
 
 
-def repl(handle: RemoteExecutor) -> None:
+def repl(handle: RemoteExecutor, *, flush_database: bool = False) -> None:
     compiler, buf = codeop.CommandCompiler(), []
     interactive = sys.stdin.isatty()
     operation_label = "REPL: interactive" if interactive else "REPL: stdin"
@@ -92,6 +94,7 @@ def repl(handle: RemoteExecutor) -> None:
                 "<stdin>",
                 json_mode=False,
                 operation_label=operation_label,
+                flush_database=flush_database,
             )
 
 
@@ -125,6 +128,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json", action="store_true", help="Output only JSON to stdout."
     )
+    parser.add_argument(
+        "--flush-database",
+        action="store_true",
+        help="flush unpacked IDB buffers before each Python execution",
+    )
     args = parser.parse_args(argv)
 
     with DatabaseHandle.open(args.path) as handle:
@@ -138,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
                 code = f.read()
             operation_label = _script_operation_label(filename)
         else:
-            repl(handle)
+            repl(handle, flush_database=args.flush_database)
             return 0
 
         if not exec(
@@ -147,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             filename,
             args.json,
             operation_label=operation_label,
+            flush_database=args.flush_database,
         ):
             return 1
     return 0

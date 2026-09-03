@@ -32,6 +32,7 @@ class InProcessHandle:
         operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
+        flush_database: bool = False,
     ) -> PythonExecutionResult:
         self.calls.append(
             {

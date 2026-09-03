@@ -67,8 +67,9 @@ class StaticBackend:
         operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
+        flush_database: bool = False,
     ) -> PythonExecutionResult:
-        del lease_id, operation_id, operation_label, persist_globals
+        del lease_id, operation_id, operation_label, persist_globals, flush_database
         return {
             "result": {"code": code, "timeout": timeout},
             "stdout": "",
@@ -323,6 +324,7 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
             resolved_entry,
             keepalive=0,
             idle_timeout=None,
+            recovery="none",
             on_disconnect=None,
         ):
             self.opened = (
@@ -331,6 +333,7 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
                 keepalive,
                 idle_timeout,
                 on_disconnect,
+                recovery,
             )
 
     monkeypatch.setattr(client_mod, "resolve_instance", fake_resolve)
@@ -367,6 +370,7 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
     )
 
     assert handle.opened[:4] == ("firmware.bin", entry, 0.0, 30)
+    assert handle.opened[5] == "none"
     assert captured["path"] == "firmware.bin"
     assert captured["options"] == {
         "spawn": True,
@@ -1116,6 +1120,7 @@ def test_list_databases_does_not_wait_for_an_active_operation(
             operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
+            flush_database: bool = False,
         ) -> PythonExecutionResult:
             self.started.set()
             assert self.release.wait(2)
@@ -1127,6 +1132,7 @@ def test_list_databases_does_not_wait_for_an_active_operation(
                 operation_label=operation_label,
                 persist_globals=persist_globals,
                 filename=filename,
+                flush_database=flush_database,
             )
 
     idb_path = tmp_path / "open.i64"
@@ -1449,6 +1455,7 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
             operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
+            flush_database: bool = False,
         ):
             self.calls.append(("execute", code, timeout, operation_id, operation_label))
             return super().execute_python(
@@ -1458,6 +1465,7 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
                 operation_id=operation_id,
                 operation_label=operation_label,
                 persist_globals=persist_globals,
+                flush_database=flush_database,
             )
 
         def wait_autoanalysis(self, timeout: float | None):
@@ -2155,9 +2163,7 @@ def test_handle_idle_timeout_disconnects_only_managed_workers(tmp_path: Path) ->
         while handle.connected and time.monotonic() < deadline:
             time.sleep(0.01)
         assert not handle.connected
-        assert reasons == [
-            "database lease expired after 0.1 seconds of inactivity"
-        ]
+        assert reasons == ["database lease expired after 0.1 seconds of inactivity"]
         assert stopped.wait(1)
     finally:
         handle.close()
@@ -2299,6 +2305,7 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
             operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
+            flush_database: bool = False,
         ):
             if code == "second":
                 return super().execute_python(
@@ -2308,6 +2315,7 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
                     operation_id=operation_id,
                     operation_label=operation_label,
                     persist_globals=persist_globals,
+                    flush_database=flush_database,
                 )
             self.started.set()
             assert self.cancelled.wait(2)
@@ -2419,8 +2427,9 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
             operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
+            flush_database: bool = False,
         ):
-            del lease_id, operation_id, operation_label, persist_globals
+            del lease_id, operation_id, operation_label, persist_globals, flush_database
             self.started.set()
             assert self.cancelled.wait(2)
             raise RuntimeError("cancelled")

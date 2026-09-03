@@ -177,6 +177,59 @@ def _inline_runtime(monkeypatch: pytest.MonkeyPatch) -> IDARuntime:
     return runtime
 
 
+def test_execute_python_flushes_database_before_user_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_loader",
+        SimpleNamespace(flush_buffers=lambda: calls.append("flush") or 1),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_execute_user_code",
+        lambda *_args: calls.append("execute") or 42,
+    )
+
+    result = runtime.execute_python("42", timeout=1.0, flush_database=True)
+
+    assert result["result"] == 42
+    assert calls == ["flush", "execute"]
+
+
+@pytest.mark.parametrize("failure", ("return_false", "raise"))
+def test_execute_python_continues_when_database_flush_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    calls: list[str] = []
+
+    def flush_buffers() -> int:
+        calls.append("flush")
+        if failure == "raise":
+            raise RuntimeError("license does not permit flushing")
+        return 0
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_loader",
+        SimpleNamespace(flush_buffers=flush_buffers),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_execute_user_code",
+        lambda *_args: calls.append("execute") or 42,
+    )
+
+    result = runtime.execute_python("42", timeout=1.0, flush_database=True)
+
+    assert result["result"] == 42
+    assert calls == ["flush", "execute"]
+
+
 @pytest.mark.parametrize("handler", ("except:", "except BaseException:"))
 def test_execute_python_protects_cancellation_from_generated_handlers(
     monkeypatch: pytest.MonkeyPatch,

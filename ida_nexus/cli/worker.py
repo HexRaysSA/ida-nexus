@@ -135,6 +135,9 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_LEASE_GRACE_SECONDS,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--save-after-open", action="store_true", help=argparse.SUPPRESS
+    )
     return parser
 
 
@@ -300,6 +303,12 @@ def main(argv: list[str] | None = None) -> int:
             args=options,
             save_on_close=True,
         )
+        if args.save_after_open:
+            recovered_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB) or ""
+            if not recovered_path or not ida_loader.save_database(recovered_path, 0):
+                raise RuntimeError(
+                    "IDA repaired the unpacked database but failed to save a packed base"
+                )
         # Non-empty IDA command options make idalib reinitialize its kernel.
         # Create and install Python hooks only after that cycle has completed.
         analysis_hook = create_autoanalysis_hook(analysis_state)

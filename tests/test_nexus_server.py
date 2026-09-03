@@ -28,6 +28,7 @@ class RecordingBackend:
         operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
+        flush_database: bool = False,
     ):
         self.calls.append(
             (
@@ -38,6 +39,7 @@ class RecordingBackend:
                 operation_id,
                 operation_label,
                 persist_globals,
+                flush_database,
             )
         )
         if code == "return-bytes":
@@ -245,6 +247,7 @@ def test_background_autoanalysis_prioritizes_operations_without_reserving_ids(
                 None,
                 "__ida_nexus_startup_autoanalysis__",
                 None,
+                False,
                 False,
             ),
             ("advance", 2),
@@ -500,6 +503,7 @@ def test_execute_wait_and_save_routes(tmp_path: Path):
                 "timeout": 2.5,
                 "operation_id": "request-1",
                 "operation_label": "IDA Nexus TUI: Duncan",
+                "flush_database": True,
             },
         )
         assert status == 200
@@ -529,6 +533,7 @@ def test_execute_wait_and_save_routes(tmp_path: Path):
                 "request-1",
                 "IDA Nexus TUI: Duncan",
                 False,
+                True,
             ),
             ("wait", 4.0),
             ("save",),
@@ -567,6 +572,23 @@ def test_execute_rejects_invalid_timeouts(tmp_path: Path):
             )
             assert status == 400
             assert payload["error"]["code"] == "invalid_timeout"
+        assert backend.calls == []
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_execute_rejects_non_boolean_flush_database(tmp_path: Path) -> None:
+    server, backend = make_server(tmp_path)
+    try:
+        status, payload, _ = request(
+            server,
+            "POST",
+            "/execute_python",
+            {"code": "lambda: 1", "flush_database": "yes"},
+        )
+        assert status == 400
+        assert payload["error"]["code"] == "invalid_flush_database"
         assert backend.calls == []
     finally:
         server.stop()
@@ -646,7 +668,7 @@ def test_compressed_request_body(tmp_path: Path):
         response.read()
         connection.close()
         assert backend.calls == [
-            ("execute_python", "lambda: 7", None, None, None, None, False)
+            ("execute_python", "lambda: 7", None, None, None, None, False, False)
         ]
     finally:
         server.stop()
@@ -676,7 +698,7 @@ def test_chunked_framing_browser_gate_and_size_limit(tmp_path: Path):
         assert status == 200
         assert json.loads(response_body)["result"] == {"code": "lambda: 9"}
         assert backend.calls == [
-            ("execute_python", "lambda: 9", None, None, None, None, False)
+            ("execute_python", "lambda: 9", None, None, None, None, False, False)
         ]
 
         malformed_trailer = f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n \r\n\r\n"
@@ -1041,6 +1063,7 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
             operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
+            flush_database: bool = False,
         ):
             self.calls.append(
                 (
@@ -1051,6 +1074,7 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
                     code,
                     timeout,
                     persist_globals,
+                    flush_database,
                 )
             )
             return {"lease_id": lease_id}
@@ -1112,7 +1136,7 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
             assert time.monotonic() < deadline
             time.sleep(0.01)
         assert backend.calls == [
-            ("execute", "scoped", None, None, "result = 1", None, True),
+            ("execute", "scoped", None, None, "result = 1", None, True, False),
             ("release_session", "scoped"),
         ]
     finally:

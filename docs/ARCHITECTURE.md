@@ -416,6 +416,33 @@ Worker lifetime follows the explicit SSE lease, not the incidental lifetime of
 a reusable RPC socket or a fragile client-maintained process refcount. Client
 crashes and `kill -9` are handled by socket and kernel-lock cleanup.
 
+## Crash-safe database reopening
+
+IDA holds the unpacked database's `.id0` open under an OS-level denial/exclusive
+lock for the session lifetime. Nexus probes that lock before spawning over a
+database not represented in the registry. While holding the probe lock, it
+reads the B-tree `isTreeOpen` byte: a dirty unlocked `.id0` identifies crash
+leftovers; a locked `.id0` identifies a live IDA even when that process has no
+Nexus plugin.
+
+Recovery never reconnects an existing handle and never retries an ambiguous
+Python POST. The failed handle reports `DatabaseCrashedError` when the dirty
+state is observable. Consumers may call `probe_database_state()` and explicitly
+open a replacement. An unpacked-only crash is opened without the destructive
+`-c -o` import path, repaired by IDA, and immediately packed. When a packed base
+also exists, unpacked components are durably copied to `<idb>.crash-*` before
+IDA restores the packed base. Indeterminate file states and live foreign owners
+fail closed.
+
+`flush_database=True` on `/execute_python` makes a best-effort
+`ida_loader.flush_buffers()` call inside the same IDA main-thread operation
+immediately before user code. License configurations that reject flushing do
+not block execution. A successful flush does not pack the IDB and does not
+cover mutations made later by that same crashing snippet. The option defaults
+to false for the public Python API and CLI. The MCP tool deliberately does not
+expose this policy decision to the model.
+
+
 ## MCP model
 
 The MCP server keeps MCP-local opaque `instance_id` values mapped to
@@ -434,7 +461,7 @@ Tools are:
 |---|---|
 | `reference(query)` | Search the installed ida-domain API reference. |
 | `open_database(path, set_current=True)` | Attach to a GUI or shared managed worker. |
-| `execute_python(code, instance_id=None, timeout=360, filename=None)` | Wait without a deadline for initial autoanalysis once through a separate handle request, then execute Python against the selected handle with the numeric execution-only timeout. |
+| `execute_python(code, instance_id=None, timeout=360, filename=None)` | Wait without a deadline for initial autoanalysis once through a separate handle request, then execute Python against the selected handle with the numeric execution-only timeout. Flush policy is not model-controlled. |
 | `list_databases()` | Discover registered instances and identify this MCP server's handles. |
 | `save_database(instance_id=None)` | Explicitly save the selected database. |
 | `close_database(instance_id=None)` | Release this MCP server's handle. If that commits final managed shutdown, wait up to 305 seconds for the IDB close and lifetime-lock release; it is not a global close. |

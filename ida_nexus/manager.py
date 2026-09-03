@@ -21,7 +21,16 @@ from ida_nexus._registry import (
     scan_instances,
 )
 from ida_nexus._resolver import expected_idb_path
-from ida_nexus.errors import DatabaseSelectionError, NexusConnectionError
+from ida_nexus.database_state import (
+    DatabaseRecovery,
+    probe_database_state,
+)
+from ida_nexus.errors import (
+    DatabaseCrashedError,
+    DatabaseSelectionError,
+    NexusConnectionError,
+    NexusError,
+)
 from ida_nexus.handle import DatabaseHandle
 from ida_nexus.models import PythonExecutionResult
 from ida_nexus.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
@@ -78,6 +87,10 @@ class OpenDatabaseResult(TypedDict):
     instance_id: str
     backend: Annotated[str, "Instance backend: gui or idalib."]
     status: Annotated[str, "Attachment state: attached or current."]
+    recovery: Annotated[
+        DatabaseRecovery,
+        "Crash recovery performed while opening: none, repaired, or restored.",
+    ]
 
 
 class WaitAutoanalysisResult(TypedDict):
@@ -98,6 +111,12 @@ class _AttachedDatabase:
     entry: DatabaseInstance
     instance_id: str
     current: bool
+
+
+@dataclass(frozen=True)
+class _DisconnectedDatabase:
+    requested_path: str
+    reason: str
 
 
 @dataclass
@@ -141,11 +160,9 @@ class DatabaseManager:
         self._open_timeout = open_timeout
         self._execute_timeout = execute_timeout
         self._keepalive = float(keepalive)
-        self._idle_timeout = (
-            float(idle_timeout) if idle_timeout is not None else None
-        )
+        self._idle_timeout = float(idle_timeout) if idle_timeout is not None else None
         self._instances: dict[str, _DatabaseSession] = {}
-        self._disconnected_instances: dict[str, str] = {}
+        self._disconnected_instances: dict[str, _DisconnectedDatabase] = {}
         self._disconnected_default: str | None = None
         self._current_instance_id: str | None = None
         self._lock = threading.RLock()
@@ -165,6 +182,7 @@ class DatabaseManager:
             "instance_id": session.instance_id,
             "requested_path": session.requested_path,
             **_entry_target_fields(session.handle.instance),
+            "recovery": session.handle.recovery,
         }
 
     def _handle_disconnected(self, handle: DatabaseHandle, reason: str) -> None:
@@ -180,15 +198,20 @@ class DatabaseManager:
             if session is None:
                 return
             self._instances.pop(session.instance_id, None)
-            self._disconnected_instances[session.instance_id] = reason
+            self._disconnected_instances[session.instance_id] = _DisconnectedDatabase(
+                requested_path=session.requested_path,
+                reason=reason,
+            )
             if self._current_instance_id == session.instance_id:
                 self._current_instance_id = None
                 self._disconnected_default = session.instance_id
+        database_state = probe_database_state(session.requested_path)
         self._emit(
             "database_disconnected",
             instance_id=session.instance_id,
             target=self._database_info(session),
             reason=reason,
+            database_state=database_state,
         )
 
     def open_database(self, path: str, *, set_current: bool) -> OpenDatabaseResult:
@@ -309,10 +332,26 @@ class DatabaseManager:
                 instance_id=existing.instance_id,
                 backend=existing.handle.instance.backend,
                 status="current" if current == existing.instance_id else "attached",
+                recovery=existing.handle.recovery,
             )
 
-    @staticmethod
-    def _disconnected_error(instance_id: str) -> DatabaseSelectionError:
+    def _disconnected_error(
+        self,
+        instance_id: str,
+        disconnected: _DisconnectedDatabase | None = None,
+    ) -> NexusError:
+        if disconnected is None:
+            with self._lock:
+                disconnected = self._disconnected_instances.get(instance_id)
+        if disconnected is not None:
+            database_state = probe_database_state(disconnected.requested_path)
+            if database_state["state"] == "crashed":
+                return DatabaseCrashedError(
+                    f"database worker for instance {instance_id} crashed and left "
+                    f"a dirty unpacked database at {database_state['id0_path']}; "
+                    "call open_database() to recover it",
+                    database_state,
+                )
         return DatabaseSelectionError(
             f"database instance {instance_id} disconnected since it was last used "
             "and is no longer valid; call list_databases() and open_database() again"
@@ -372,7 +411,7 @@ class DatabaseManager:
             session = self._instances.get(target_id)
             disconnected = self._disconnected_instances.get(target_id)
         if session is None and disconnected is not None:
-            raise self._disconnected_error(target_id)
+            raise self._disconnected_error(target_id, disconnected)
         if session is None:
             raise DatabaseSelectionError(f"unknown database instance: {target_id}")
         return target_id, session
@@ -410,6 +449,7 @@ class DatabaseManager:
         operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
+        flush_database: bool = False,
     ) -> PythonExecutionResult:
         effective_timeout = self._execute_timeout if timeout is None else timeout
         if (
@@ -430,6 +470,7 @@ class DatabaseManager:
                 operation_label=operation_label,
                 persist_globals=persist_globals,
                 filename=filename,
+                flush_database=flush_database,
             )
         except NexusConnectionError:
             if not session.handle.connected:

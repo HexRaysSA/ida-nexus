@@ -79,9 +79,7 @@ def test_programmatic_http_server_builds_manager_and_uses_prefix(
     ("host", "port"),
     [("", 18737), ("127.0.0.1", 0), ("127.0.0.1", 65536)],
 )
-def test_programmatic_http_server_rejects_invalid_address(
-    host: str, port: int
-) -> None:
+def test_programmatic_http_server_rejects_invalid_address(host: str, port: int) -> None:
     with pytest.raises(ValueError):
         mcp_api.serve_http(host, port)
 
@@ -123,9 +121,7 @@ def test_mcp_cli_argument_overrides_idle_timeout_environment(
     serve = Mock()
     monkeypatch.setattr(mcp_cli, "serve_stdio", serve)
 
-    assert mcp_cli.cli(
-        ["--transport", "stdio", "--idle-timeout", "120"]
-    ) == 0
+    assert mcp_cli.cli(["--transport", "stdio", "--idle-timeout", "120"]) == 0
     assert serve.call_args.kwargs["idle_timeout"] == 120.0
 
 

@@ -3,7 +3,7 @@ import os
 import subprocess
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ._registry import (
@@ -18,6 +18,11 @@ from ._registry import (
     ensure_private_directory,
     idb_key,
     scan_instances,
+)
+from .database_state import (
+    _backup_unpacked_database,
+    expected_idb_path,
+    probe_database_state,
 )
 from .errors import (
     AmbiguousDatabaseError,
@@ -57,6 +62,7 @@ class WorkerLaunchOptions:
     windows_dir: str | None = None
     no_segmentation: bool = False
     debug_flags: int | tuple[str, ...] = 0
+    save_after_open: bool = False
 
     def __post_init__(self) -> None:
         if self.image_base is not None:
@@ -93,11 +99,6 @@ WorkerSpawner = Callable[
 
 def _string_tuple(values: Sequence[str]) -> tuple[str, ...]:
     return (values,) if isinstance(values, str) else tuple(values)
-
-
-def expected_idb_path(path: str | os.PathLike[str]) -> str:
-    source = canonical_path(path)
-    return source if source.lower().endswith(".i64") else source + ".i64"
 
 
 def _single(
@@ -195,12 +196,19 @@ def _build_worker_command(
         "--lease-grace",
         str(lease_grace),
     ]
-    if input_path == source and source != expected_idb:
+    default_idb = expected_idb_path(source)
+    if (
+        input_path == source
+        and source != expected_idb
+        and (options.new_database or expected_idb != default_idb)
+    ):
         command.extend(["--output-database", expected_idb])
     if options.auto_analysis:
         command.append("--auto-analysis")
     else:
         command.append("--no-auto-analysis")
+    if options.save_after_open:
+        command.append("--save-after-open")
     if options.image_base is not None:
         command.extend(["--image-base", hex(options.image_base)])
     if options.new_database:
@@ -529,6 +537,47 @@ def resolve_instance(
             raise NoDatabaseInstanceError(expected_idb)
         if not os.path.exists(source):
             raise FileNotFoundError(source)
+        file_state = probe_database_state(source, output_database=expected_idb)
+        if file_state["state"] == "in_use":
+            raise DatabaseBusyError(
+                f"an unregistered IDA session owns {file_state['id0_path']}"
+            )
+        if file_state["state"] == "unknown":
+            raise DatabaseOpenError(
+                f"cannot safely open database with indeterminate unpacked state: "
+                f"{file_state['error'] or file_state['id0_path']}"
+            )
+        if file_state["state"] in {"crashed", "unpacked"}:
+            default_idb = expected_idb_path(source)
+            if expected_idb != default_idb and not file_state["packed_database_exists"]:
+                raise DatabaseOpenError(
+                    "cannot automatically recover an unpacked database at a custom "
+                    f"output path: {expected_idb}"
+                )
+        if file_state["state"] == "crashed":
+            if new_database or file_state["packed_database_exists"]:
+                try:
+                    _backup_unpacked_database(file_state)
+                except OSError as error:
+                    raise DatabaseOpenError(
+                        f"failed to preserve crashed database files: {error}"
+                    ) from error
+                after_backup = probe_database_state(
+                    source,
+                    output_database=expected_idb,
+                )
+                if after_backup["state"] == "in_use":
+                    raise DatabaseBusyError(
+                        f"an IDA session acquired {after_backup['id0_path']} "
+                        "during crash recovery"
+                    )
+                if after_backup["state"] == "unknown":
+                    raise DatabaseOpenError(
+                        "database state became indeterminate during crash recovery: "
+                        f"{after_backup['error'] or after_backup['id0_path']}"
+                    )
+            else:
+                launch_options = replace(launch_options, save_after_open=True)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"timed out resolving {expected_idb}")

@@ -1,6 +1,9 @@
 """Public exception hierarchy for IDA Nexus clients."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .database_state import DatabaseFileState
 
 
 class NexusError(RuntimeError):
@@ -53,3 +56,11 @@ class WorkerStartError(DatabaseOpenError):
 
 class DatabaseSelectionError(NexusError):
     """A multi-database manager has no valid selected target."""
+
+
+class DatabaseCrashedError(DatabaseDisconnectedError):
+    """An IDA process crashed and left a dirty unpacked database."""
+
+    def __init__(self, message: str, database_state: "DatabaseFileState") -> None:
+        super().__init__(message)
+        self.database_state = database_state

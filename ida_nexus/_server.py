@@ -45,6 +45,7 @@ class NexusBackend(Protocol):
         operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
+        flush_database: bool = False,
     ) -> Any: ...
 
     def cancel_active(self) -> None: ...
@@ -702,9 +703,7 @@ class NexusHTTPServer:
                     },
                     separators=(",", ":"),
                 )
-                file.write(
-                    f"event: lease_expired\ndata: {expiration}\n\n".encode()
-                )
+                file.write(f"event: lease_expired\ndata: {expiration}\n\n".encode())
                 file.flush()
 
         return HTTPResponse(
@@ -862,6 +861,16 @@ class NexusHTTPServer:
         return persist_globals
 
     @staticmethod
+    def _flush_database(payload: dict[str, Any]) -> bool:
+        flush_database = payload.get("flush_database", False)
+        if not isinstance(flush_database, bool):
+            raise APIError(
+                "invalid_flush_database",
+                "flush_database must be a boolean",
+            )
+        return flush_database
+
+    @staticmethod
     def _filename(payload: dict[str, Any]) -> str:
         filename = payload.get("filename", USER_CODE_FILENAME)
         if not isinstance(filename, str) or not filename.strip():
@@ -961,9 +970,7 @@ class NexusHTTPServer:
                     payload = {}
                 else:
                     payload = {
-                        "lease_id": (
-                            lease_values[0] if len(lease_values) == 1 else ""
-                        )
+                        "lease_id": (lease_values[0] if len(lease_values) == 1 else "")
                     }
             else:
                 payload = (
@@ -1009,6 +1016,7 @@ class NexusHTTPServer:
                             "invalid_code", "code must be a non-empty string"
                         )
                     persist_globals = self._persist_globals(payload)
+                    flush_database = self._flush_database(payload)
                     if persist_globals and lease_id is None:
                         raise APIError(
                             "invalid_lease",
@@ -1028,6 +1036,7 @@ class NexusHTTPServer:
                                 operation_label=operation_label,
                                 persist_globals=persist_globals,
                                 filename=filename,
+                                flush_database=flush_database,
                             ),
                             operation_id,
                         )

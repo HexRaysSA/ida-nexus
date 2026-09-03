@@ -99,6 +99,49 @@ status without confusing IDA's temporary suspension during GUI actions.
 `execute_python()` is stateless by default; pass `persist_globals=True` to keep
 a lease-scoped Python namespace between calls.
 
+### Crash detection and recovery
+
+`execute_python()` never retries after a connection failure because the code may
+already have mutated the IDB. Pass `flush_database=True` when the work already
+in the unpacked database should be flushed to `.id0`/`.id1` immediately before
+the next snippet starts:
+
+```python
+from ida_nexus import DatabaseCrashedError
+
+try:
+    handle.execute_python(risky_code, flush_database=True)
+except DatabaseCrashedError as error:
+    print(error.database_state)
+```
+
+This is a best-effort buffer flush, not a packed `.i64` save. License
+configurations that reject flushing do not block Python execution. A successful
+flush protects changes made before that execution; changes made by the crashing
+snippet after the flush may still be lost. The public Python API, HTTP endpoint,
+and `ida-nexus exec --flush-database` expose this policy; the MCP tool does not
+let the model select it.
+
+`probe_database_state(path)` combines the `.id0` OS lock with its B-tree
+`isTreeOpen` byte and reports `missing`, `packed`, `in_use`, `crashed`,
+`unpacked`, or `unknown`. A failed lease is permanent: close the old handle and
+open a new one. `DatabaseHandle.recovery` and `DatabaseManager.open_database()`'s
+`recovery` result then report:
+
+| Result | Behavior |
+|---|---|
+| `none` | No crashed database was observed. |
+| `repaired` | Only dirty unpacked files existed. IDA repaired them and Nexus immediately created a packed base. |
+| `restored` | A packed base existed. Nexus preserved the dirty unpacked files in an adjacent `<idb>.crash-*` directory, then restored the packed base. Changes newer than that packed base are not active automatically. |
+
+An unregistered live IDA holding the `.id0` lock causes `DatabaseBusyError`.
+Missing `.id0`, malformed headers, partial component sets, and custom output
+paths that cannot be recovered safely cause `DatabaseOpenError` rather than a
+destructive fresh import. If IDA itself cannot repair an unpacked-only database,
+worker startup fails and the unpacked files remain available for manual
+recovery. Advisory file locking can be unreliable on NFS/SMB; an unlocked probe
+on network storage is not proof that no live owner exists.
+
 Library leases are indefinite by default. A client that wants its own managed
 idalib lease released after inactivity can set `idle_timeout` without affecting
 other leases on the shared worker:
