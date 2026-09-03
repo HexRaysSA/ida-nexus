@@ -21,10 +21,7 @@ from ida_nexus._registry import (
     scan_instances,
 )
 from ida_nexus._resolver import expected_idb_path
-from ida_nexus.database_state import (
-    DatabaseRecovery,
-    probe_database_state,
-)
+from ida_nexus.database_state import probe_database_state
 from ida_nexus.errors import (
     DatabaseCrashedError,
     DatabaseSelectionError,
@@ -88,7 +85,7 @@ class OpenDatabaseResult(TypedDict):
     backend: Annotated[str, "Instance backend: gui or idalib."]
     status: Annotated[str, "Attachment state: attached or current."]
     recovery: Annotated[
-        DatabaseRecovery,
+        str,
         "Crash recovery performed while opening: none, repaired, or restored.",
     ]
 
