@@ -1,6 +1,6 @@
 [project]
 name = "ida-nexus"
-version = "0.10.1"
+version = "0.10.2"
 description = "IDA Nexus allows multiple clients to seamlessly share and operate on IDA databases."
 readme = "README.md"
 license = "MIT"
