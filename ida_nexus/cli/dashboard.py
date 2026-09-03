@@ -543,6 +543,7 @@ table.sessions td:first-child a { word-break: break-all; }
   font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
 .badge.claude { color: #b0530a; border-color: #b0530a55; }
 .badge.codex { color: var(--ok); border-color: var(--ok); }
+.badge.copilot { color: #6f42c1; border-color: #6f42c155; }
 .badge.pi { color: var(--accent); border-color: var(--accent); }
 .badge.omp { color: #9b59ff; border-color: #9b59ff; }
 .badge.open { color: var(--ok); border-color: var(--ok); }
@@ -1258,9 +1259,9 @@ def _interleave_transcript(
 def _session_usage(summary: SessionSummary) -> dict[str, Any]:
     """Token/cost totals for one semantic session, scoped to its time window.
 
-    Claude and Pi usage is summed per-message within the window. Codex has only
-    whole-session cumulative counts (no per-message data, no cost), so those are
-    used as-is when the instance has no windowable per-message usage.
+    Claude and Pi usage is summed per-message within the window. Codex and
+    Copilot expose only whole-session cumulative counts, so those are used
+    when the instance has no windowable per-message usage.
     """
     totals = _blank_totals()
     for _kind, session_path in _summary_agent_sessions(summary):
@@ -1272,7 +1273,7 @@ def _session_usage(summary: SessionSummary) -> dict[str, Any]:
         if windowed:
             for usage in windowed:
                 _add_usage(totals, usage)
-        elif kind == "codex" and session_totals["has_tokens"]:
+        elif kind in {"codex", "copilot"} and session_totals["has_tokens"]:
             _add_usage(totals, session_totals)
     return totals
 
@@ -1411,13 +1412,27 @@ def render_session(name: str, *, export: bool = False) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# Agent transcript pages (Claude Code + Codex + Pi + OMP)
+# Agent transcript pages (Claude Code + Codex + Copilot + Pi + OMP)
 # --------------------------------------------------------------------------
 
 
 def _detect_agent_kind(records: list[dict]) -> str:
     for record in records:
         record_type = record.get("type")
+        data = record.get("data")
+        if (
+            record_type == "session.start"
+            and isinstance(data, dict)
+            and data.get("producer") == "copilot-agent"
+        ):
+            return "copilot"
+        if record_type in {
+            "user.message",
+            "assistant.message",
+            "tool.execution_start",
+            "tool.execution_complete",
+        }:
+            return "copilot"
         if record_type == "session" and "version" in record:
             return "pi"
         if record_type in (
@@ -1433,7 +1448,7 @@ def _detect_agent_kind(records: list[dict]) -> str:
 
 
 def _agent_models(records: list[dict], kind: str) -> list[str]:
-    """Best-effort model names from Claude, Codex, and Pi transcripts."""
+    """Best-effort model names from supported agent transcripts."""
     if kind == "pi":
         records = _pi_active_branch_records(records)
 
@@ -1461,6 +1476,17 @@ def _agent_models(records: list[dict], kind: str) -> list[str]:
                     settings = collaboration.get("settings")
                     if isinstance(settings, dict):
                         model = settings.get("model")
+        elif kind == "copilot":
+            data = record.get("data")
+            if isinstance(data, dict):
+                if record_type == "assistant.message":
+                    model = data.get("model")
+                elif record_type == "session.auto_mode_resolved":
+                    model = data.get("chosenModel")
+                elif record_type == "session.model_change":
+                    model = data.get("newModel")
+                    if model == "auto":
+                        model = None
         if isinstance(model, str) and model and model not in models:
             models.append(model)
     return models
@@ -1489,8 +1515,8 @@ _NEXUS_TOOL_NAMES = {
 
 
 def _nexus_tool_name(tool_name: str) -> str | None:
-    """Return the underlying IDA tool name across Claude, Codex, and Pi forms."""
-    if tool_name.startswith("ida_"):
+    """Return the underlying IDA tool name across supported agent forms."""
+    if tool_name.startswith(("ida_", "ida-")):
         candidate = tool_name[4:]
     elif tool_name.startswith("mcp__"):
         candidate = tool_name.rsplit("__", 1)[-1]
@@ -1504,9 +1530,9 @@ def _nexus_tool_name(tool_name: str) -> str | None:
 
 
 def _tool_display_name(tool_name: str) -> str:
-    """Render names consistently, including Pi's ida_ prefixed tools."""
+    """Render names consistently, including prefixed Pi and Copilot tools."""
     nexus_name = _nexus_tool_name(tool_name)
-    if tool_name.startswith("ida_") and nexus_name:
+    if tool_name.startswith(("ida_", "ida-")) and nexus_name:
         return f"ida · {nexus_name}"
     if not tool_name.startswith("mcp__"):
         return tool_name
@@ -1645,6 +1671,29 @@ def _codex_record_supported(record: dict[str, Any]) -> bool:
     if record_type == "response_item":
         return payload_type in {"function_call", "function_call_output"}
     return False
+
+
+_COPILOT_SUPPORTED_RECORD_TYPES = {
+    "assistant.message",
+    "assistant.reasoning",
+    "assistant.turn_end",
+    "assistant.turn_start",
+    "hook.end",
+    "hook.start",
+    "session.auto_mode_resolved",
+    "session.model_change",
+    "session.shutdown",
+    "session.start",
+    "session.usage_checkpoint",
+    "system.message",
+    "tool.execution_complete",
+    "tool.execution_start",
+    "user.message",
+}
+
+
+def _copilot_record_supported(record: dict[str, Any]) -> bool:
+    return record.get("type") in _COPILOT_SUPPORTED_RECORD_TYPES
 
 
 def _unsupported_agent_item(
@@ -2208,6 +2257,151 @@ def _codex_session_totals(records: list[dict]) -> dict[str, Any]:
     return totals
 
 
+def _copilot_result_text(data: dict[str, Any]) -> tuple[str, str]:
+    if data.get("success"):
+        result = data.get("result")
+        if isinstance(result, dict):
+            return _tool_result_text(result.get("content")), "result"
+        return _tool_result_text(result), "result"
+
+    error = data.get("error")
+    if isinstance(error, dict):
+        return _tool_result_text(error.get("message") or error), "error"
+    return _tool_result_text(error), "error"
+
+
+def _copilot_items(
+    records: list[dict],
+) -> tuple[list[TranscriptItem], dict[str, str]]:
+    tool_results: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if record.get("type") != "tool.execution_complete":
+            continue
+        data = record.get("data")
+        if not isinstance(data, dict):
+            continue
+        call_id = data.get("toolCallId")
+        if isinstance(call_id, str):
+            tool_results[call_id] = data
+
+    meta: dict[str, str] = {}
+    items: list[TranscriptItem] = []
+    for record in records:
+        record_type = record.get("type")
+        ts = _parse_ts(record.get("timestamp"))
+        data = record.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        if ts is not None and not _copilot_record_supported(record):
+            items.append(_unsupported_agent_item(record, ts, "copilot"))
+
+        if record_type == "session.start":
+            for key in ("sessionId", "copilotVersion", "startTime"):
+                value = data.get(key)
+                if value:
+                    meta[key] = str(value)
+            context = data.get("context")
+            if isinstance(context, dict):
+                for key in ("cwd", "repository", "branch"):
+                    value = context.get(key)
+                    if value:
+                        meta[key] = str(value)
+        elif record_type == "user.message":
+            text = str(data.get("content", "")).strip()
+            if text:
+                items.append(
+                    TranscriptItem(
+                        ts,
+                        "user",
+                        _message_bubble("user", "user", _render_markdownish(text), ts),
+                    )
+                )
+        elif record_type == "assistant.reasoning":
+            text = str(data.get("content") or data.get("reasoningText") or "").strip()
+            if text:
+                items.append(
+                    TranscriptItem(
+                        ts,
+                        "thinking",
+                        f"<details><summary>reasoning</summary>"
+                        f'<div class="msg"><div class="text">{_e(text)}</div>'
+                        f"</div></details>",
+                    )
+                )
+        elif record_type == "assistant.message":
+            model = str(data.get("model", ""))
+            text = str(data.get("content", "")).strip()
+            if text:
+                items.append(
+                    TranscriptItem(
+                        ts,
+                        "assistant",
+                        _message_bubble(
+                            model or "copilot",
+                            "assistant",
+                            _render_markdownish(text),
+                            ts,
+                        ),
+                    )
+                )
+
+            requests = data.get("toolRequests")
+            for request in requests if isinstance(requests, list) else []:
+                if not isinstance(request, dict):
+                    continue
+                tool_name = str(request.get("name", "tool"))
+                body_parts = [_tool_input_html(tool_name, request.get("arguments"))]
+                call_id = request.get("toolCallId")
+                result = tool_results.get(call_id) if isinstance(call_id, str) else None
+                if result is not None:
+                    result_text, label = _copilot_result_text(result)
+                    if result_text.strip():
+                        body_parts.append(_text_block(result_text, 700, label))
+                items.append(
+                    TranscriptItem(
+                        ts,
+                        "tool",
+                        _message_bubble(
+                            _tool_display_name(tool_name),
+                            "toolcall",
+                            "".join(body_parts),
+                            ts,
+                        ),
+                        tool_name=tool_name,
+                    )
+                )
+    return items, meta
+
+
+def _copilot_session_totals(records: list[dict]) -> dict[str, Any]:
+    totals = _blank_totals()
+    token_details: dict[str, Any] | None = None
+    for record in records:
+        if record.get("type") != "session.shutdown":
+            continue
+        data = record.get("data")
+        if isinstance(data, dict) and isinstance(data.get("tokenDetails"), dict):
+            token_details = data["tokenDetails"]
+
+    if token_details is None:
+        return totals
+
+    for source, target in (
+        ("input", "input"),
+        ("output", "output"),
+        ("cache_read", "cache_read"),
+        ("cache_write", "cache_write"),
+    ):
+        value = token_details.get(source)
+        if isinstance(value, dict):
+            value = value.get("tokenCount")
+        totals[target] = _as_int(value)
+    totals["has_tokens"] = any(
+        totals[key] for key in ("input", "output", "cache_read", "cache_write")
+    )
+    return totals
+
+
 _AgentItemsResult = tuple[
     list[TranscriptItem],
     dict[str, str],
@@ -2252,6 +2446,9 @@ def _load_agent_items(
     if kind == "codex":
         items, meta = _codex_items(records)
         totals = _codex_session_totals(records)
+    elif kind == "copilot":
+        items, meta = _copilot_items(records)
+        totals = _copilot_session_totals(records)
     elif kind == "pi":
         items, meta = _pi_items(records)
         totals = _blank_totals()

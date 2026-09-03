@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 
 from ida_nexus.mcp import (
@@ -70,6 +72,36 @@ def _report_codex_session(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _report_copilot_session(payload: dict[str, object]) -> dict[str, object]:
+    tool_args = payload.get("toolArgs")
+    if not isinstance(tool_args, dict):
+        tool_args = {}
+
+    existing_meta = tool_args.get("_meta")
+    if not isinstance(existing_meta, dict):
+        existing_meta = {}
+
+    updated_args = dict(tool_args)
+    updated_meta = dict(existing_meta)
+    session_id = payload.get("sessionId")
+    if isinstance(session_id, str) and session_id:
+        configured_home = os.environ.get("COPILOT_HOME")
+        copilot_home = (
+            Path(configured_home).expanduser()
+            if configured_home
+            else Path.home() / ".copilot"
+        )
+        transcript_path = copilot_home / "session-state" / session_id / "events.jsonl"
+        updated_meta["copilot_session_path"] = str(transcript_path)
+    if updated_meta:
+        updated_args["_meta"] = updated_meta
+
+    return {
+        "permissionDecision": "allow",
+        "modifiedArgs": updated_args,
+    }
+
+
 def _report_session_main(platform: str) -> int:
     """Inject agent transcript/session metadata into a PreToolUse tool input."""
 
@@ -86,6 +118,8 @@ def _report_session_main(platform: str) -> int:
         response = _report_claude_session(payload)
     elif platform == "codex":
         response = _report_codex_session(payload)
+    elif platform == "copilot":
+        response = _report_copilot_session(payload)
     else:
         print(f"report-session: unsupported platform: {platform}", file=sys.stderr)
         return 2
@@ -151,7 +185,7 @@ def cli(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--report-session",
-        choices=["claude", "codex"],
+        choices=["claude", "codex", "copilot"],
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args(argv)

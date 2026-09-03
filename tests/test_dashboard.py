@@ -11,6 +11,117 @@ from ida_nexus.cli import dashboard
 
 
 class TranscriptTests(unittest.TestCase):
+    def test_copilot_transcript_renders_messages_tools_and_usage(self) -> None:
+        records = [
+            {
+                "type": "session.start",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "data": {
+                    "sessionId": "copilot-session",
+                    "producer": "copilot-agent",
+                    "copilotVersion": "1.0.82",
+                    "context": {
+                        "cwd": "/tmp/project",
+                        "repository": "HexRaysSA/ida-mcp",
+                        "branch": "main",
+                    },
+                },
+            },
+            {
+                "type": "user.message",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "data": {"content": "Look up Database"},
+            },
+            {
+                "type": "assistant.message",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "data": {
+                    "model": "gpt-5.6",
+                    "content": "",
+                    "toolRequests": [
+                        {
+                            "toolCallId": "copilot-call",
+                            "name": "ida-reference",
+                            "arguments": {"query": "Database"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "tool.execution_complete",
+                "timestamp": "2026-01-01T00:00:03Z",
+                "data": {
+                    "toolCallId": "copilot-call",
+                    "success": True,
+                    "result": {"content": "IDA Domain API reference"},
+                },
+            },
+            {
+                "type": "assistant.message",
+                "timestamp": "2026-01-01T00:00:04Z",
+                "data": {
+                    "model": "gpt-5.6",
+                    "content": "IDA Domain API reference",
+                    "toolRequests": [],
+                },
+            },
+            {
+                "type": "session.shutdown",
+                "timestamp": "2026-01-01T00:00:05Z",
+                "data": {
+                    "tokenDetails": {
+                        "input": {"tokenCount": 11},
+                        "output": {"tokenCount": 22},
+                        "cache_read": {"tokenCount": 33},
+                        "cache_write": {"tokenCount": 44},
+                    }
+                },
+            },
+        ]
+
+        self.assertEqual(dashboard._detect_agent_kind(records), "copilot")
+        items, meta = dashboard._copilot_items(records)
+        totals = dashboard._copilot_session_totals(records)
+
+        self.assertEqual(meta["sessionId"], "copilot-session")
+        self.assertEqual(meta["repository"], "HexRaysSA/ida-mcp")
+        self.assertEqual(
+            [item.category for item in items],
+            ["user", "tool", "assistant"],
+        )
+        tool_item = items[1]
+        self.assertEqual(tool_item.tool_name, "ida-reference")
+        self.assertIn("ida · reference", tool_item.html)
+        self.assertIn("IDA Domain API reference", tool_item.html)
+        self.assertEqual(dashboard._nexus_tool_name("ida-reference"), "reference")
+        self.assertEqual(
+            {
+                key: totals[key]
+                for key in ("input", "output", "cache_read", "cache_write")
+            },
+            {"input": 11, "output": 22, "cache_read": 33, "cache_write": 44},
+        )
+        self.assertTrue(totals["has_tokens"])
+        self.assertFalse(totals["cost_available"])
+
+    def test_unknown_copilot_event_remains_visible(self) -> None:
+        timestamp = "2026-01-01T00:00:02Z"
+        items, _meta = dashboard._copilot_items(
+            [
+                {
+                    "type": "copilot.future_event",
+                    "timestamp": timestamp,
+                    "data": {"value": "future event value"},
+                }
+            ]
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].category, "event")
+        self.assertEqual(items[0].ts, dashboard._parse_ts(timestamp))
+        self.assertIn("copilot · copilot.future_event", items[0].html)
+        self.assertIn("future event value", items[0].html)
+
     def test_active_pi_branch_keeps_tool_names(self) -> None:
         records = [
             {
@@ -279,6 +390,26 @@ class TranscriptTests(unittest.TestCase):
                 "codex",
             ),
             ["gpt-5.5"],
+        )
+        self.assertEqual(
+            dashboard._agent_models(
+                [
+                    {
+                        "type": "session.model_change",
+                        "data": {"newModel": "auto"},
+                    },
+                    {
+                        "type": "session.auto_mode_resolved",
+                        "data": {"chosenModel": "gpt-5.6-luna"},
+                    },
+                    {
+                        "type": "assistant.message",
+                        "data": {"model": "gpt-5.6-luna"},
+                    },
+                ],
+                "copilot",
+            ),
+            ["gpt-5.6-luna"],
         )
 
 
