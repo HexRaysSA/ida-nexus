@@ -11,12 +11,13 @@ _COMMAND_HELP = {
     "dashboard": "inspect MCP session logs",
     "logs": "export MCP session logs to ZIP",
     "reference": "query the ida-domain API reference",
-    "exec": "execute Python against an IDA database",
+    "python": "execute Python against an IDA database",
 }
 
 _COMMAND_HIDDEN = (
     "worker",
     "benchmark",
+    "exec",
 )
 
 
@@ -58,8 +59,8 @@ def _command(name: str) -> Callable[[list[str] | None], int]:
         from .dashboard import cli
 
         return cli
-    if name == "exec":
-        from .exec import main
+    if name in {"python", "exec"}:
+        from .python import main
 
         return main
     if name == "logs":

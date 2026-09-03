@@ -41,10 +41,10 @@ uvx ida-nexus logs
 uvx ida-nexus reference "decompile function"
 
 # Execute Python against an IDB (command, script, repl)
-uvx ida-nexus exec tests/crackme03/elf -c 'db.functions.get_all()'
+uvx ida-nexus python tests/crackme03/elf -c 'db.functions.get_all()'
 ```
 
-`exec` labels resulting database events by input mode: `REPL: interactive` for
+`python` labels resulting database events by input mode: `REPL: interactive` for
 a terminal session, `REPL: stdin` for piped input, `REPL: command` for `-c`,
 and `REPL: script <absolute path>` for a script file. These labels are restored
 between executions like every other `execute_python()` provenance label.
@@ -119,7 +119,7 @@ configurations that reject flushing do not block Python execution. The first
 flush protects earlier work; the second protects changes made by the snippet
 when execution returns or raises a Python exception. A native process crash
 cannot run the second flush. The public Python API, HTTP endpoint, and
-`ida-nexus exec --flush-database` expose this policy; the MCP tool does not let
+`ida-nexus python --flush-database` expose this policy; the MCP tool does not let
 the model select it.
 
 `probe_database_state(path)` combines the `.id0` OS lock with its B-tree

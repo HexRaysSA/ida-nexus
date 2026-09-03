@@ -108,7 +108,7 @@ def _script_operation_label(filename: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ida-nexus exec",
+        prog="ida-nexus python",
         description="Execute Python script or command in the context of an IDA database.",
     )
     parser.add_argument(

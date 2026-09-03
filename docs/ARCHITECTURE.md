@@ -404,7 +404,7 @@ remain and the final lease's keepalive has expired, the worker stops serving,
 returns to the idalib main thread, saves/closes the IDB, then withdraws its
 registry record and exits.
 
-The `ida-nexus exec` adapter supplies an operation label for every execution:
+The `ida-nexus python` adapter supplies an operation label for every execution:
 `REPL: interactive`, `REPL: stdin`, `REPL: command`, or
 `REPL: script <absolute path>`. Script labels retain the path suffix when the
 1024-character protocol limit requires truncation.
