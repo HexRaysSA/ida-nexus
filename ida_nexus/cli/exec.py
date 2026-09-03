@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--flush-database",
         action="store_true",
-        help="flush unpacked IDB buffers before each Python execution",
+        help="flush unpacked IDB buffers before and after each Python execution",
     )
     args = parser.parse_args(argv)
 

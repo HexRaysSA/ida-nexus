@@ -177,7 +177,7 @@ def _inline_runtime(monkeypatch: pytest.MonkeyPatch) -> IDARuntime:
     return runtime
 
 
-def test_execute_python_flushes_database_before_user_code(
+def test_execute_python_flushes_database_before_and_after_user_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _inline_runtime(monkeypatch)
@@ -196,7 +196,7 @@ def test_execute_python_flushes_database_before_user_code(
     result = runtime.execute_python("42", timeout=1.0, flush_database=True)
 
     assert result["result"] == 42
-    assert calls == ["flush", "execute"]
+    assert calls == ["flush", "execute", "flush"]
 
 
 @pytest.mark.parametrize("failure", ("return_false", "raise"))
@@ -227,7 +227,29 @@ def test_execute_python_continues_when_database_flush_fails(
     result = runtime.execute_python("42", timeout=1.0, flush_database=True)
 
     assert result["result"] == 42
-    assert calls == ["flush", "execute"]
+    assert calls == ["flush", "execute", "flush"]
+
+
+def test_execute_python_flushes_after_user_code_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_loader",
+        SimpleNamespace(flush_buffers=lambda: calls.append("flush") or 1),
+    )
+
+    def fail(*_args: Any) -> None:
+        calls.append("execute")
+        raise RuntimeError("user code failed")
+
+    monkeypatch.setattr(runtime_module, "_execute_user_code", fail)
+
+    with pytest.raises(RuntimeError, match="user code failed"):
+        runtime.execute_python("raise", timeout=1.0, flush_database=True)
+    assert calls == ["flush", "execute", "flush"]
 
 
 @pytest.mark.parametrize("handler", ("except:", "except BaseException:"))

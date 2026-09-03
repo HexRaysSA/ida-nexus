@@ -789,13 +789,15 @@ class IDARuntime:
             filename = USER_CODE_FILENAME
 
         def execute() -> Any:
-            if flush_database:
-                # Flushing is a best-effort durability hint. Some license tiers
-                # reject it; user code must still run in that configuration.
-                with suppress(Exception):
-                    import ida_loader
+            def flush() -> None:
+                if flush_database:
+                    # Best effort: some license tiers reject database flushing.
+                    with suppress(Exception):
+                        import ida_loader
 
-                    ida_loader.flush_buffers()
+                        ida_loader.flush_buffers()
+
+            flush()
             hook = self._idb_change_hook
             previous_operation: tuple[str | None, str | None, str | None] | None = None
             if hook is not None:
@@ -845,6 +847,7 @@ class IDARuntime:
                     result = asyncio.run(result)
                 return result
             finally:
+                flush()
                 if previous_operation is not None:
                     (
                         hook.operation_id,

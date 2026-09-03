@@ -434,13 +434,14 @@ also exists, unpacked components are durably copied to `<idb>.crash-*` before
 IDA restores the packed base. Indeterminate file states and live foreign owners
 fail closed.
 
-`flush_database=True` on `/execute_python` makes a best-effort
-`ida_loader.flush_buffers()` call inside the same IDA main-thread operation
-immediately before user code. License configurations that reject flushing do
-not block execution. A successful flush does not pack the IDB and does not
-cover mutations made later by that same crashing snippet. The option defaults
-to false for the public Python API and CLI. The MCP tool deliberately does not
-expose this policy decision to the model.
+`flush_database=True` on `/execute_python` makes best-effort
+`ida_loader.flush_buffers()` calls inside the same IDA main-thread operation
+immediately before and after user code. The second flush runs when user code
+returns or raises a Python exception; a native process crash cannot reach it.
+License configurations that reject flushing do not block execution. Successful
+flushes do not pack the IDB. The option defaults to false for the public Python
+API and CLI. The MCP tool deliberately does not expose this policy decision to
+the model.
 
 
 ## MCP model

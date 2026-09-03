@@ -102,9 +102,8 @@ a lease-scoped Python namespace between calls.
 ### Crash detection and recovery
 
 `execute_python()` never retries after a connection failure because the code may
-already have mutated the IDB. Pass `flush_database=True` when the work already
-in the unpacked database should be flushed to `.id0`/`.id1` immediately before
-the next snippet starts:
+already have mutated the IDB. Pass `flush_database=True` to flush the unpacked
+`.id0`/`.id1` buffers immediately before and after the snippet:
 
 ```python
 from ida_nexus import DatabaseCrashedError
@@ -115,12 +114,13 @@ except DatabaseCrashedError as error:
     print(error.database_state)
 ```
 
-This is a best-effort buffer flush, not a packed `.i64` save. License
-configurations that reject flushing do not block Python execution. A successful
-flush protects changes made before that execution; changes made by the crashing
-snippet after the flush may still be lost. The public Python API, HTTP endpoint,
-and `ida-nexus exec --flush-database` expose this policy; the MCP tool does not
-let the model select it.
+These are best-effort buffer flushes, not packed `.i64` saves. License
+configurations that reject flushing do not block Python execution. The first
+flush protects earlier work; the second protects changes made by the snippet
+when execution returns or raises a Python exception. A native process crash
+cannot run the second flush. The public Python API, HTTP endpoint, and
+`ida-nexus exec --flush-database` expose this policy; the MCP tool does not let
+the model select it.
 
 `probe_database_state(path)` combines the `.id0` OS lock with its B-tree
 `isTreeOpen` byte and reports `missing`, `packed`, `in_use`, `crashed`,
