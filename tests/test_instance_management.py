@@ -1101,6 +1101,88 @@ def test_database_event_inherits_active_trace_call_id(monkeypatch) -> None:
     assert fields["call_id"] == "tool-call-id"
 
 
+def test_database_disconnect_sends_structured_warning(monkeypatch) -> None:
+    traces: list[tuple[str, dict[str, object]]] = []
+    output = BytesIO()
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda event, **fields: traces.append((event, fields))),
+    )
+    database_state = {
+        "state": "crashed",
+        "id0_path": "/tmp/sample.id0",
+        "packed_database_exists": False,
+    }
+    target = {
+        "record_id": "123-deadbe",
+        "pid": 123,
+        "idb_path": "/tmp/sample.i64",
+        "worker_log_path": "/tmp/123-deadbe.log",
+    }
+
+    with mcp_app.mcp._stdio_output_scope(output):
+        mcp_app._trace_database_event(
+            "database_disconnected",
+            {
+                "instance_id": "instance-1",
+                "reason": "database process crashed",
+                "target": target,
+                "database_state": database_state,
+            },
+        )
+
+    notification = json.loads(output.getvalue())
+    assert notification["method"] == "notifications/message"
+    assert notification["params"] == {
+        "level": "warning",
+        "logger": "ida_nexus.database",
+        "data": {
+            "event": "database_lost",
+            "message": (
+                "IDA database worker crashed; "
+                "the previous instance is permanently invalid"
+            ),
+            "instance_id": "instance-1",
+            "reason": "database process crashed",
+            "target": target,
+            "database_state": database_state,
+            "recovery_required": True,
+        },
+    }
+    assert traces[0][0] == "database_disconnected"
+    assert traces[0][1]["level"] == "warning"
+    assert traces[0][1]["database_state"] == database_state
+
+
+def test_database_disconnect_trace_survives_unavailable_logging_transport(
+    monkeypatch,
+) -> None:
+    traces: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda event, **fields: traces.append((event, fields))),
+    )
+
+    def unavailable(*_args, **_kwargs) -> None:
+        raise RuntimeError("no active stdio transport")
+
+    monkeypatch.setattr(mcp_app.mcp, "send_log_message", unavailable)
+
+    mcp_app._trace_database_event(
+        "database_disconnected",
+        {
+            "instance_id": "instance-1",
+            "reason": "connection closed",
+            "database_state": {"state": "unknown"},
+        },
+    )
+
+    assert traces[0][0] == "database_disconnected"
+    assert traces[0][1]["level"] == "warning"
+
+
 def test_list_databases_does_not_wait_for_an_active_operation(
     tmp_path: Path,
     monkeypatch,

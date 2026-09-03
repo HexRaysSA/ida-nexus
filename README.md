@@ -134,6 +134,13 @@ open a new one. `DatabaseHandle.recovery` and `DatabaseManager.open_database()`'
 | `repaired` | Only dirty unpacked files existed. IDA repaired them and Nexus immediately created a packed base. |
 | `restored` | A packed base existed. Nexus preserved the dirty unpacked files in an adjacent `<idb>.crash-*` directory, then restored the packed base. Changes newer than that packed base are not active automatically. |
 
+Unexpected disconnection records `database_disconnected` at warning level in
+the semantic session trace. Stdio MCP clients also receive a ZeroMCP
+`notifications/message` warning from logger `ida_nexus.database`. Its structured
+data contains `event`, `message`, `instance_id`, `reason`, `target`,
+`database_state`, and `recovery_required`. Streamable HTTP does not currently
+support MCP logging notifications; the semantic warning record is still written.
+
 An unregistered live IDA holding the `.id0` lock causes `DatabaseBusyError`.
 Missing `.id0`, malformed headers, partial component sets, and custom output
 paths that cannot be recovered safely cause `DatabaseOpenError` rather than a

@@ -506,6 +506,15 @@ by `call_id`. Database binding events contain MCP-local and registry identity,
 including the worker operational log path, and inherit the active `call_id`
 when emitted during a tool invocation.
 
+Unexpected database disconnection adds `level: "warning"` to that semantic
+event. With ZeroMCP 1.10 or newer, an active stdio transport also sends
+`notifications/message` at warning level under logger `ida_nexus.database`.
+The data object contains the `database_lost` event name, human-readable message,
+MCP-local instance ID, disconnect reason, complete target identity,
+`database_state` probe result, and whether crash recovery is required. Warning
+delivery is best effort because ZeroMCP does not support logging notifications
+over Streamable HTTP; trace emission is transport-independent.
+
 Agent integrations attach transcript paths as hidden `_meta` fields using the
 `<agent-kind>_session_path` convention (for example, `omp_session_path`). The
 MCP adapter promotes those fields into request metadata and removes them from

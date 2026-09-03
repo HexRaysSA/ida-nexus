@@ -85,6 +85,8 @@ from ida_nexus.paths import _get_idausr_dir
 SESSIONS_DIR = get_state_dir() / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 360
+
+
 def _mcp_idle_timeout_from_environment() -> float | None:
     raw_value = os.environ.get(MCP_IDLE_TIMEOUT_ENVIRONMENT_VARIABLE)
     if raw_value is None or not raw_value.strip():
@@ -291,11 +293,46 @@ def _as_tool_error(error: Exception) -> McpToolError:
     return McpToolError(str(error) or type(error).__name__)
 
 
+def _database_lost_warning(fields: dict[str, Any]) -> dict[str, Any]:
+    database_state = fields.get("database_state")
+    crashed = (
+        isinstance(database_state, dict) and database_state.get("state") == "crashed"
+    )
+    message = (
+        "IDA database worker crashed; the previous instance is permanently invalid"
+        if crashed
+        else "IDA database connection was lost; the previous instance is permanently invalid"
+    )
+    return cast(
+        dict[str, Any],
+        _trace_jsonable(
+            {
+                "event": "database_lost",
+                "message": message,
+                "instance_id": fields.get("instance_id"),
+                "reason": fields.get("reason"),
+                "target": fields.get("target"),
+                "database_state": database_state,
+                "recovery_required": crashed,
+            }
+        ),
+    )
+
+
 def _trace_database_event(event: str, fields: dict[str, Any]) -> None:
     fields = dict(fields)
     error = fields.get("error")
     if isinstance(error, Exception):
         fields["error"] = _error_fields(error)
+    if event == "database_disconnected":
+        fields.setdefault("level", "warning")
+        warning = _database_lost_warning(fields)
+        with suppress(RuntimeError, OSError):
+            mcp.send_log_message(
+                "warning",
+                warning,
+                logger="ida_nexus.database",
+            )
     call_id = _TRACE_CALL_ID.get()
     if call_id is not None:
         fields.setdefault("call_id", call_id)
