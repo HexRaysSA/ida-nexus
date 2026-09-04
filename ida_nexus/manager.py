@@ -35,9 +35,6 @@ from ida_nexus.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
 
 DEFAULT_OPEN_TIMEOUT_SECONDS = 300.0
 DEFAULT_EXECUTE_TIMEOUT_SECONDS = 360.0
-# Concurrent shutdown releases are bounded by the shared close deadline; this
-# grace only covers each handle's own lease-thread join and socket teardown.
-SHUTDOWN_JOIN_GRACE_SECONDS = 5.0
 
 
 DatabaseEventCallback = Callable[[str, dict[str, Any]], None]
@@ -634,31 +631,15 @@ class DatabaseManager:
         )
         return CloseDatabaseResult(closed=True)
 
-    def _release_for_shutdown(self, session: _DatabaseSession, deadline: float) -> None:
-        try:
-            session.handle.close(
-                wait_for_database=True,
-                timeout=max(0.0, deadline - time.monotonic()),
-            )
-        except Exception as error:  # noqa: BLE001 -- best-effort shutdown reporting
-            self._emit(
-                "database_release_error",
-                instance_id=session.instance_id,
-                error=error,
-            )
-
     def shutdown(self, *, timeout: float = DATABASE_CLOSE_TIMEOUT_SECONDS) -> None:
-        """Release every handle, waiting for final managed IDB closes.
+        """Release every handle and wait for final managed IDB closes.
 
-        Process shutdown is a managed worker's last chance to pack its IDB, and
-        releasing a lease only asks the worker to start closing. Whatever stops
-        this process (a service replacement, a restarted host) may kill the
-        still-writing worker moments later, so drain those closes here instead
-        of returning while packs are in flight and leaving a stale or truncated
-        ``.i64`` behind. ``timeout`` bounds the whole drain, after which a
-        wedged worker is reported and abandoned rather than blocking exit.
+        Releasing a lease only asks the worker to start packing its IDB, and
+        whatever stops this process may kill that worker moments later, leaving
+        a stale or truncated ``.i64``. Every handle is released under one shared
+        ``timeout`` budget; a worker that overruns it is reported as
+        ``database_release_error`` instead of blocking exit.
         """
-
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
@@ -678,17 +659,30 @@ class DatabaseManager:
         if not sessions:
             return
         deadline = time.monotonic() + float(timeout)
+
+        def _release(session: _DatabaseSession) -> None:
+            try:
+                session.handle.close(
+                    wait_for_database=True,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
+            except Exception as error:  # noqa: BLE001 -- best-effort shutdown reporting
+                self._emit(
+                    "database_release_error",
+                    instance_id=session.instance_id,
+                    error=error,
+                )
+
         if len(sessions) == 1:
-            self._release_for_shutdown(sessions[0], deadline)
+            _release(sessions[0])
             return
-        # Each worker packs its own IDB, so spend the shutdown budget on all of
-        # them at once. Draining sequentially would strand the last database in
-        # exactly the position this wait exists to fix.
+        # Each worker packs its own IDB, so release them at once: draining one
+        # after another would spend the budget before reaching the last one.
         threads = [
             threading.Thread(
-                target=self._release_for_shutdown,
-                args=(session, deadline),
-                name=f"nexus-shutdown-{session.instance_id}",
+                target=_release,
+                args=(session,),
+                name=f"shutdown-release-{session.instance_id}",
                 daemon=True,
             )
             for session in sessions
@@ -696,6 +690,4 @@ class DatabaseManager:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(
-                max(0.0, deadline - time.monotonic()) + SHUTDOWN_JOIN_GRACE_SECONDS
-            )
+            thread.join()
