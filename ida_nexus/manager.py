@@ -164,7 +164,10 @@ class DatabaseManager:
         self._disconnected_default: str | None = None
         self._current_instance_id: str | None = None
         self._lock = threading.RLock()
-        self._open_lock = threading.Lock()
+        # Shutdown takes the same lock so a handle cannot be created between
+        # its session snapshot and the manager becoming terminal. Keep this
+        # reentrant because an open event callback may itself request shutdown.
+        self._open_lock = threading.RLock()
         self._shutdown_started = False
         # Background thread from a scheduled startup open, if any. Operations
         # that need the current database wait on it so they do not race the
@@ -647,7 +650,11 @@ class DatabaseManager:
             or timeout < 0
         ):
             raise ValueError("timeout must be a finite non-negative number")
-        with self._lock:
+        # An open holds _open_lock from its initial shutdown check until its
+        # handle is installed. Waiting here makes that handle part of this
+        # snapshot; taking the lock first also prevents later opens from
+        # slipping past the terminal-state transition.
+        with self._open_lock, self._lock:
             if self._shutdown_started:
                 return
             self._shutdown_started = True

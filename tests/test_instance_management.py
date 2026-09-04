@@ -1424,11 +1424,15 @@ def test_get_session_waits_for_in_flight_startup_open(tmp_path: Path) -> None:
     assert session is sentinel
 
 
-def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
+def test_shutdown_waits_for_in_flight_open_and_releases_handle(monkeypatch) -> None:
     open_started = threading.Event()
     finish_open = threading.Event()
     handle_closed = threading.Event()
+    shutdown_started = threading.Event()
+    shutdown_finished = threading.Event()
     failures: list[Exception] = []
+    shutdown_failures: list[Exception] = []
+    close_options: dict[str, Any] = {}
 
     entry = DatabaseInstance(
         record_id="123-abcdef",
@@ -1448,6 +1452,7 @@ def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
         def __init__(self) -> None:
             self.instance = entry
             self.disconnect_reason = None
+            self.recovery = "none"
             self._connected = True
 
         @property
@@ -1457,13 +1462,14 @@ def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
         def set_disconnect_callback(self, _callback) -> None:
             pass
 
-        def close(self) -> None:
+        def close(self, **kwargs) -> None:
+            close_options.update(kwargs)
             self._connected = False
             handle_closed.set()
 
     @classmethod
     def slow_open(cls, path: str, **kwargs) -> SlowHandle:
-        assert path.endswith("/tmp/test")
+        del cls, path
         assert kwargs["options"].auto_analysis is True
         open_started.set()
         assert finish_open.wait(2)
@@ -1478,20 +1484,33 @@ def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
         except Exception as exc:  # noqa: BLE001 - captured for the assertion
             failures.append(exc)
 
-    thread = threading.Thread(target=open_database)
-    thread.start()
+    def shutdown() -> None:
+        shutdown_started.set()
+        try:
+            manager.shutdown()
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion
+            shutdown_failures.append(exc)
+        finally:
+            shutdown_finished.set()
+
+    open_thread = threading.Thread(target=open_database)
+    shutdown_thread = threading.Thread(target=shutdown)
+    open_thread.start()
     assert open_started.wait(1)
 
-    # Reproduction: shutdown completes while handle creation is still blocked.
-    manager.shutdown()
+    shutdown_thread.start()
+    assert shutdown_started.wait(1)
+    assert not shutdown_finished.wait(0.1)
     finish_open.set()
-    thread.join(2)
+    open_thread.join(2)
+    shutdown_thread.join(2)
 
-    assert not thread.is_alive()
+    assert not open_thread.is_alive()
+    assert not shutdown_thread.is_alive()
     assert handle_closed.is_set()
-    assert len(failures) == 1
-    assert isinstance(failures[0], DatabaseSelectionError)
-    assert "shutting down" in str(failures[0])
+    assert close_options["wait_for_database"] is True
+    assert failures == []
+    assert shutdown_failures == []
     assert manager._instances == {}
 
 
