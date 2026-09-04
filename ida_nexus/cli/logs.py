@@ -192,6 +192,30 @@ def _agent_references(path: Path) -> list[_AgentReference]:
             references.append(
                 _AgentReference(kind, value, _find_agent_file(value, path))
             )
+
+    # OMP stores delegated sessions beside ``parent.jsonl`` in
+    # ``parent/*.jsonl``. Include the whole delegation group, including agents
+    # that never received or called an IDA Nexus tool and therefore cannot
+    # appear in a semantic trace of their own.
+    for reference in list(references):
+        source = reference.source_path
+        if source is None:
+            continue
+        children = source.with_suffix("")
+        try:
+            candidates = sorted(children.glob("*.jsonl")) if children.is_dir() else []
+        except OSError:
+            candidates = []
+        for candidate in candidates:
+            try:
+                child = candidate.resolve()
+            except OSError:
+                continue
+            key = (reference.kind, str(child))
+            if not child.is_file() or key in seen:
+                continue
+            seen.add(key)
+            references.append(_AgentReference(reference.kind, str(child), child))
     return references
 
 

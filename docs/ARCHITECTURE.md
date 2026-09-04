@@ -42,7 +42,6 @@ connection expresses one client's interest in an already-running database.
 | `ida_nexus/mcp.py` | Reusable ZeroMCP tools and transports, manager composition, error mapping, startup attachment, and semantic session tracing. |
 | `ida_nexus/cli/` | Implements the single `ida-nexus` entry point plus thin MCP, dashboard, execution, logs, benchmark, and internal worker command adapters. |
 | `ida_nexus/cli/mcp.py` | Parses MCP CLI and agent-hook arguments, then invokes the reusable `ida_nexus.mcp` API. |
-| `ida-nexus.ts` | Shared Pi/oh-my-pi extension that starts MCP asynchronously from `session_start`, mirrors its tools with `ida_` names, attaches compatible transcript metadata, and applies host output truncation. Both hosts can enter the session immediately; their lifecycle runners publish late tool registrations before the first model turn. |
 | `ida_nexus/cli/dashboard.py` | Renders semantic session traces and linked agent transcripts from the local state directory or a portable log ZIP. |
 | `ida_nexus/cli/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
 | `scripts/migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
@@ -552,7 +551,10 @@ transcript paths referenced by discoverable semantic sessions.
 
 `ida-nexus logs` packages all local semantic sessions by default, or only
 explicitly named session files, together with every available linked agent
-transcript and every file under the operational `logs/` directory. The root
+transcript, OMP child transcripts stored beside a linked parent transcript, and
+every file under the operational `logs/` directory. Including the sibling child
+group preserves agents that never received a Nexus route and therefore emitted
+no semantic session. The root
 `ida-nexus-logs.json` TOC records schema/version, checksums,
 original-to-archive path mappings, per-session transcript references, and
 missing references for semantic and agent sessions. Operational files are

@@ -174,6 +174,37 @@ class LogArchiveTests(unittest.TestCase):
                 summary = dashboard._scan_sessions()[0]
                 self.assertEqual(set(summary.agent_sessions), {"omp", "future_agent"})
 
+    def test_archive_collects_delegated_siblings_without_nexus_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "agents" / "run.jsonl"
+            successful_child = root / "agents" / "run" / "Successful.jsonl"
+            blocked_child = root / "agents" / "run" / "Blocked.jsonl"
+            session = root / "sessions" / "semantic.jsonl"
+            _write_jsonl(parent, _pi_records())
+            _write_jsonl(successful_child, _pi_records())
+            _write_jsonl(blocked_child, _pi_records())
+            records = _semantic_records("delegated")
+            for record in records:
+                record["session"] = {"omp_session_path": str(parent)}
+            _write_jsonl(session, records)
+
+            output = root / "delegated.zip"
+            result = create_log_archive(output, [session])
+
+            self.assertEqual(result.agent_session_count, 3)
+            with zipfile.ZipFile(output) as archive:
+                toc = json.loads(archive.read(TOC_NAME))
+                references = toc["sessions"][0]["agent_sessions"]
+                self.assertEqual(
+                    {reference["source_path"] for reference in references},
+                    {
+                        str(parent.resolve()),
+                        str(successful_child.resolve()),
+                        str(blocked_child.resolve()),
+                    },
+                )
+
     def test_operational_logs_are_included_without_toc_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

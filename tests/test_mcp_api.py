@@ -125,6 +125,16 @@ def test_mcp_cli_argument_overrides_idle_timeout_environment(
     assert serve.call_args.kwargs["idle_timeout"] == 120.0
 
 
+def test_open_database_recovery_output_schema_is_string() -> None:
+    tool = next(
+        tool
+        for tool in mcp_api.mcp._mcp_tools_list()["tools"]
+        if tool["name"] == "open_database"
+    )
+
+    assert tool["outputSchema"]["properties"]["recovery"]["type"] == "string"
+
+
 def test_tool_rejects_builtin_name_collision() -> None:
     def open_database() -> None:
         pass
