@@ -487,7 +487,13 @@ IDA to unwind safely before abandoning the MCP request without a response.
 On stdio EOF, SIGINT, SIGTERM, or normal interpreter exit, the MCP server
 releases all handles. Other agents continue uninterrupted. If the released
 lease was the last lease on a managed worker, that worker performs its own
-shutdown. MCP and direct library leases remain indefinite unless they opt in.
+shutdown, and the server waits for that worker's IDB to finish closing:
+releasing a lease only asks the worker to pack, so exiting first would let
+whatever stops this process kill a still-writing worker and leave a stale or
+truncated `.i64`. Handles are released concurrently under one 305-second
+budget; a worker that overruns it is reported and abandoned rather than
+blocking exit. MCP and direct library leases remain indefinite unless they
+opt in.
 The MCP accepts `--idle-timeout` or `IDA_NEXUS_MCP_IDLE_TIMEOUT`; zero disables
 idle release explicitly.
 

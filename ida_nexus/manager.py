@@ -7,6 +7,7 @@ error presentation, request metadata, and tracing belong to those adapters.
 
 import math
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,7 +29,7 @@ from ida_nexus.errors import (
     NexusConnectionError,
     NexusError,
 )
-from ida_nexus.handle import DatabaseHandle
+from ida_nexus.handle import DATABASE_CLOSE_TIMEOUT_SECONDS, DatabaseHandle
 from ida_nexus.models import PythonExecutionResult
 from ida_nexus.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
 
@@ -163,7 +164,10 @@ class DatabaseManager:
         self._disconnected_default: str | None = None
         self._current_instance_id: str | None = None
         self._lock = threading.RLock()
-        self._open_lock = threading.Lock()
+        # Shutdown takes the same lock so a handle cannot be created between
+        # its session snapshot and the manager becoming terminal. Keep this
+        # reentrant because an open event callback may itself request shutdown.
+        self._open_lock = threading.RLock()
         self._shutdown_started = False
         # Background thread from a scheduled startup open, if any. Operations
         # that need the current database wait on it so they do not race the
@@ -630,8 +634,27 @@ class DatabaseManager:
         )
         return CloseDatabaseResult(closed=True)
 
-    def shutdown(self) -> None:
-        with self._lock:
+    def shutdown(self, *, timeout: float = DATABASE_CLOSE_TIMEOUT_SECONDS) -> None:
+        """Release every handle and wait for final managed IDB closes.
+
+        Releasing a lease only asks the worker to start packing its IDB, and
+        whatever stops this process may kill that worker moments later, leaving
+        a stale or truncated ``.i64``. Every handle is released under one shared
+        ``timeout`` budget; a worker that overruns it is reported as
+        ``database_release_error`` instead of blocking exit.
+        """
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            raise ValueError("timeout must be a finite non-negative number")
+        # An open holds _open_lock from its initial shutdown check until its
+        # handle is installed. Waiting here makes that handle part of this
+        # snapshot; taking the lock first also prevents later opens from
+        # slipping past the terminal-state transition.
+        with self._open_lock, self._lock:
             if self._shutdown_started:
                 return
             self._shutdown_started = True
@@ -640,12 +663,38 @@ class DatabaseManager:
             self._disconnected_instances.clear()
             self._disconnected_default = None
             self._current_instance_id = None
-        for session in sessions:
+        if not sessions:
+            return
+        deadline = time.monotonic() + float(timeout)
+
+        def _release(session: _DatabaseSession) -> None:
             try:
-                session.handle.close()
+                session.handle.close(
+                    wait_for_database=True,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
             except Exception as error:  # noqa: BLE001 -- best-effort shutdown reporting
                 self._emit(
                     "database_release_error",
                     instance_id=session.instance_id,
                     error=error,
                 )
+
+        if len(sessions) == 1:
+            _release(sessions[0])
+            return
+        # Each worker packs its own IDB, so release them at once: draining one
+        # after another would spend the budget before reaching the last one.
+        threads = [
+            threading.Thread(
+                target=_release,
+                args=(session,),
+                name=f"shutdown-release-{session.instance_id}",
+                daemon=True,
+            )
+            for session in sessions
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()

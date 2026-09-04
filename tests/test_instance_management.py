@@ -20,6 +20,7 @@ from ida_nexus import (
     DatabaseManager,
     DatabaseOpenOptions,
     DatabaseSelectionError,
+    NexusConnectionError,
     PythonExecutionResult,
     discover_databases,
     find_database_owner,
@@ -1423,11 +1424,15 @@ def test_get_session_waits_for_in_flight_startup_open(tmp_path: Path) -> None:
     assert session is sentinel
 
 
-def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
+def test_shutdown_waits_for_in_flight_open_and_releases_handle(monkeypatch) -> None:
     open_started = threading.Event()
     finish_open = threading.Event()
     handle_closed = threading.Event()
+    shutdown_started = threading.Event()
+    shutdown_finished = threading.Event()
     failures: list[Exception] = []
+    shutdown_failures: list[Exception] = []
+    close_options: dict[str, Any] = {}
 
     entry = DatabaseInstance(
         record_id="123-abcdef",
@@ -1447,6 +1452,7 @@ def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
         def __init__(self) -> None:
             self.instance = entry
             self.disconnect_reason = None
+            self.recovery = "none"
             self._connected = True
 
         @property
@@ -1456,13 +1462,14 @@ def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
         def set_disconnect_callback(self, _callback) -> None:
             pass
 
-        def close(self) -> None:
+        def close(self, **kwargs) -> None:
+            close_options.update(kwargs)
             self._connected = False
             handle_closed.set()
 
     @classmethod
     def slow_open(cls, path: str, **kwargs) -> SlowHandle:
-        assert path.endswith("/tmp/test")
+        del cls, path
         assert kwargs["options"].auto_analysis is True
         open_started.set()
         assert finish_open.wait(2)
@@ -1477,20 +1484,33 @@ def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
         except Exception as exc:  # noqa: BLE001 - captured for the assertion
             failures.append(exc)
 
-    thread = threading.Thread(target=open_database)
-    thread.start()
+    def shutdown() -> None:
+        shutdown_started.set()
+        try:
+            manager.shutdown()
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion
+            shutdown_failures.append(exc)
+        finally:
+            shutdown_finished.set()
+
+    open_thread = threading.Thread(target=open_database)
+    shutdown_thread = threading.Thread(target=shutdown)
+    open_thread.start()
     assert open_started.wait(1)
 
-    # Reproduction: shutdown completes while handle creation is still blocked.
-    manager.shutdown()
+    shutdown_thread.start()
+    assert shutdown_started.wait(1)
+    assert not shutdown_finished.wait(0.1)
     finish_open.set()
-    thread.join(2)
+    open_thread.join(2)
+    shutdown_thread.join(2)
 
-    assert not thread.is_alive()
+    assert not open_thread.is_alive()
+    assert not shutdown_thread.is_alive()
     assert handle_closed.is_set()
-    assert len(failures) == 1
-    assert isinstance(failures[0], DatabaseSelectionError)
-    assert "shutting down" in str(failures[0])
+    assert close_options["wait_for_database"] is True
+    assert failures == []
+    assert shutdown_failures == []
     assert manager._instances == {}
 
 
@@ -2417,7 +2437,7 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
-        on_shutdown=lambda: None,
+        on_shutdown=lambda: server.release_registration(),
     )
     server.start()
     manager = DatabaseManager()
@@ -2489,6 +2509,145 @@ def test_manager_close_waits_for_final_managed_idb_close(tmp_path: Path) -> None
 
     assert not thread.is_alive()
     assert failures == []
+    server.stop()
+    server.release_registration()
+
+
+def test_manager_shutdown_waits_for_final_managed_idb_close(tmp_path: Path) -> None:
+    # Regression: process shutdown must drain the worker's final pack. Returning
+    # while the IDB is still being written leaves a stale or truncated .i64
+    # behind when whatever stops this process also kills the worker.
+    executable = tmp_path / "test.exe"
+    idb = tmp_path / "test.i64"
+    executable.write_bytes(b"binary")
+    idb.write_bytes(b"idb")
+    shutdown_started = threading.Event()
+    idb_closed = threading.Event()
+
+    def finish_shutdown() -> None:
+        shutdown_started.set()
+        assert idb_closed.wait(2)
+        server.release_registration()
+
+    server = NexusHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
+        AnalysisState(),
+        REGISTRY_DIR,
+        lease_grace=30,
+        on_shutdown=finish_shutdown,
+    )
+    server.start()
+    events: list[tuple[str, dict[str, Any]]] = []
+    manager = DatabaseManager(
+        on_event=lambda event, fields: events.append((event, fields))
+    )
+    manager.open_database(str(idb), set_current=True)
+
+    thread = threading.Thread(target=manager.shutdown)
+    thread.start()
+    assert shutdown_started.wait(1)
+    assert thread.is_alive()
+    idb_closed.set()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert [event for event, _fields in events] == ["database_opened"]
+    server.stop()
+    server.release_registration()
+
+
+def test_manager_shutdown_drains_databases_concurrently(tmp_path: Path) -> None:
+    # Each worker packs its own IDB, so both releases must be in flight at once.
+    # A serial drain could not reach the second worker while the first one is
+    # still packing, which is how the last database would lose its pack.
+    release = threading.Event()
+    servers: dict[str, NexusHTTPServer] = {}
+    packing = {name: threading.Event() for name in ("first", "second")}
+
+    def start_worker(name: str) -> None:
+        idb = tmp_path / f"{name}.i64"
+        executable = tmp_path / f"{name}.exe"
+        idb.write_bytes(b"idb")
+        executable.write_bytes(b"binary")
+
+        def on_shutdown() -> None:
+            packing[name].set()
+            assert release.wait(3)
+            servers[name].release_registration()
+
+        servers[name] = NexusHTTPServer(
+            StaticBackend(),
+            InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
+            AnalysisState(),
+            REGISTRY_DIR,
+            lease_grace=30,
+            on_shutdown=on_shutdown,
+        )
+        servers[name].start()
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    manager = DatabaseManager(
+        on_event=lambda event, fields: events.append((event, fields))
+    )
+    for name in packing:
+        start_worker(name)
+        manager.open_database(str(tmp_path / f"{name}.i64"), set_current=True)
+
+    thread = threading.Thread(target=manager.shutdown)
+    thread.start()
+    assert packing["first"].wait(2)
+    assert packing["second"].wait(2)
+    assert thread.is_alive()
+    release.set()
+    thread.join(3)
+
+    assert not thread.is_alive()
+    assert [event for event, _fields in events] == [
+        "database_opened",
+        "database_opened",
+    ]
+    for server in servers.values():
+        server.stop()
+        server.release_registration()
+
+
+def test_manager_shutdown_reports_a_wedged_final_idb_close(tmp_path: Path) -> None:
+    # A worker that never finishes its pack must not hold up process exit; the
+    # bounded wait reports the timeout and abandons it.
+    executable = tmp_path / "test.exe"
+    idb = tmp_path / "test.i64"
+    executable.write_bytes(b"binary")
+    idb.write_bytes(b"idb")
+    server = NexusHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
+        AnalysisState(),
+        REGISTRY_DIR,
+        lease_grace=30,
+        # The worker accepts the release but never releases its lifetime lock.
+        on_shutdown=lambda: None,
+    )
+    server.start()
+    events: list[tuple[str, dict[str, Any]]] = []
+    manager = DatabaseManager(
+        on_event=lambda event, fields: events.append((event, fields))
+    )
+    opened = manager.open_database(str(idb), set_current=True)
+
+    started = time.monotonic()
+    manager.shutdown(timeout=0.25)
+
+    assert time.monotonic() - started < 2
+    assert [event for event, _fields in events] == [
+        "database_opened",
+        "database_release_error",
+    ]
+    fields = events[-1][1]
+    assert fields["instance_id"] == opened["instance_id"]
+    assert isinstance(fields["error"], NexusConnectionError)
+    assert "waiting for the IDB to close" in str(fields["error"])
+    assert manager._instances == {}
     server.stop()
     server.release_registration()
 
