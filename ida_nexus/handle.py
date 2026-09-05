@@ -381,15 +381,15 @@ class DatabaseHandle:
             )
 
         instance = resolve()
+        attach_options: dict[str, Any] = {
+            "path": path,
+            "keepalive": options.keepalive,
+            "on_disconnect": on_disconnect,
+            "recovery": recovery,
+        }
+        if options.idle_timeout is not None:
+            attach_options["idle_timeout"] = options.idle_timeout
         try:
-            attach_options: dict[str, Any] = {
-                "path": path,
-                "keepalive": options.keepalive,
-                "on_disconnect": on_disconnect,
-                "recovery": recovery,
-            }
-            if options.idle_timeout is not None:
-                attach_options["idle_timeout"] = options.idle_timeout
             return cls.attach(instance, **attach_options)
         except NexusConnectionError:
             # The worker may cross its zero-lease shutdown boundary between
@@ -397,14 +397,6 @@ class DatabaseHandle:
             # the instance lifecycle contract.
             time.sleep(0.05)
             replacement = resolve()
-            attach_options = {
-                "path": path,
-                "keepalive": options.keepalive,
-                "on_disconnect": on_disconnect,
-                "recovery": recovery,
-            }
-            if options.idle_timeout is not None:
-                attach_options["idle_timeout"] = options.idle_timeout
             return cls.attach(replacement, **attach_options)
 
     @property

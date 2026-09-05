@@ -306,3 +306,7 @@ MCP-style adapters that manage several handles and a current target. All
 supported Python names are exported directly from `ida_nexus`; underscore
 modules and non-exported implementation modules are private.
 See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for more details.
+
+For development, `uv run pytest` includes real idalib lifecycle tests and
+requires configured IDA. See [testing and coverage](docs/TESTING.md) for commands,
+the coverage breakdown, and remaining limits.

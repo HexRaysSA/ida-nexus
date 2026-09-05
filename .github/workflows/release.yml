@@ -80,7 +80,7 @@ jobs:
           uv run --no-project python scripts/check_wheel.py dist/*.whl
           wheel=(dist/*.whl)
           uvx --from "${wheel[0]}" ida-nexus --help >/dev/null
-          for command in mcp dashboard exec logs benchmark worker; do
+          for command in mcp dashboard python logs benchmark worker; do
             uvx --from "${wheel[0]}" ida-nexus "$command" --help >/dev/null
           done
 

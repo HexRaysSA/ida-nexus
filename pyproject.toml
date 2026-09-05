@@ -34,6 +34,9 @@ only-include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "idalib_e2e: real IDA workers; requires installed IDA and configured idalib",
+]
 
 [tool.pyright]
 # IDAPython modules provide type information but are importable only inside IDA.

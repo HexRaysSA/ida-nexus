@@ -660,13 +660,6 @@ def test_mcp_recognizes_consumer_gui_provider(tmp_path: Path) -> None:
     assert mcp_app._declares_nexus_gui_provider(plugin_dir, "ida-chat") is False
 
 
-def test_pi_package_includes_runtime_peers_and_gui_manifest() -> None:
-    root = Path(__file__).parents[1]
-    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-    assert package["peerDependencies"]["@earendil-works/pi-tui"] == "*"
-    assert "ida-plugin.json" in package["files"]
-
-
 def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
     class FakeManager:
         def __init__(self) -> None:

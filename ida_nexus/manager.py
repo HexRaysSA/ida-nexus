@@ -40,10 +40,6 @@ DEFAULT_EXECUTE_TIMEOUT_SECONDS = 360.0
 DatabaseEventCallback = Callable[[str, dict[str, Any]], None]
 
 
-def _resolve_user_path(path: str) -> str:
-    return canonical_path(path)
-
-
 def _entry_target_fields(entry: DatabaseInstance) -> dict[str, Any]:
     return {
         "record_id": entry.record_id,
@@ -221,7 +217,7 @@ class DatabaseManager:
         # registered for this path; resolve_instance matches the registry first
         # and only needs a real file when it must spawn a worker (where it
         # raises FileNotFoundError for the caller or protocol adapter to present).
-        resolved_path = _resolve_user_path(path)
+        resolved_path = canonical_path(path)
 
         # Serialize local opens so duplicate calls create at most one retained
         # lease in this manager. Other managers retain their own leases.
@@ -270,44 +266,28 @@ class DatabaseManager:
                     )
                 entry = handle.instance
                 with self._lock:
-                    # shutdown() may have run while DatabaseHandle.open() was
-                    # resolving or establishing its lease. Never install a
-                    # handle after shutdown has cleared the manager.
-                    shutting_down = self._shutdown_started
-                    if shutting_down:
-                        existing = None
-                    else:
-                        existing = next(
-                            (
-                                session
-                                for session in self._instances.values()
-                                if session.handle.connected
-                                and session.handle.instance.record_id == entry.record_id
-                            ),
-                            None,
+                    existing = next(
+                        (
+                            session
+                            for session in self._instances.values()
+                            if session.handle.connected
+                            and session.handle.instance.record_id == entry.record_id
+                        ),
+                        None,
+                    )
+                    if existing is None:
+                        instance_id = uuid.uuid4().hex[:12]
+                        existing = _DatabaseSession(
+                            instance_id=instance_id,
+                            requested_path=resolved_path,
+                            handle=handle,
                         )
-                        if existing is not None:
-                            if set_current or self._current_instance_id is None:
-                                self._current_instance_id = existing.instance_id
-                                self._disconnected_default = None
-                            current = self._current_instance_id
-                        else:
-                            instance_id = uuid.uuid4().hex[:12]
-                            existing = _DatabaseSession(
-                                instance_id=instance_id,
-                                requested_path=resolved_path,
-                                handle=handle,
-                            )
-                            self._instances[instance_id] = existing
-                            if set_current or self._current_instance_id is None:
-                                self._current_instance_id = instance_id
-                                self._disconnected_default = None
-                            current = self._current_instance_id
+                        self._instances[instance_id] = existing
+                    if set_current or self._current_instance_id is None:
+                        self._current_instance_id = existing.instance_id
+                        self._disconnected_default = None
+                    current = self._current_instance_id
 
-                if shutting_down:
-                    handle.close()
-                    raise DatabaseSelectionError("database manager is shutting down")
-                assert existing is not None
                 if existing.handle is not handle:
                     handle.close()
                     event = "database_reused"
