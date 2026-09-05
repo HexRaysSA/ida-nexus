@@ -107,12 +107,6 @@ class _AttachedDatabase:
     current: bool
 
 
-@dataclass(frozen=True)
-class _DisconnectedDatabase:
-    requested_path: str
-    reason: str
-
-
 @dataclass
 class _DatabaseSession:
     instance_id: str
@@ -156,7 +150,7 @@ class DatabaseManager:
         self._keepalive = float(keepalive)
         self._idle_timeout = float(idle_timeout) if idle_timeout is not None else None
         self._instances: dict[str, _DatabaseSession] = {}
-        self._disconnected_instances: dict[str, _DisconnectedDatabase] = {}
+        self._disconnected_instances: dict[str, str] = {}
         self._disconnected_default: str | None = None
         self._current_instance_id: str | None = None
         self._lock = threading.RLock()
@@ -195,14 +189,13 @@ class DatabaseManager:
             if session is None:
                 return
             self._instances.pop(session.instance_id, None)
-            self._disconnected_instances[session.instance_id] = _DisconnectedDatabase(
-                requested_path=session.requested_path,
-                reason=reason,
-            )
+            # A GUI may save its IDB somewhere other than <input>.i64. Retain
+            # the actual database identity for crash classification.
+            self._disconnected_instances[session.instance_id] = handle.instance.idb_path
             if self._current_instance_id == session.instance_id:
                 self._current_instance_id = None
                 self._disconnected_default = session.instance_id
-        database_state = probe_database_state(session.requested_path)
+        database_state = probe_database_state(handle.instance.idb_path)
         self._emit(
             "database_disconnected",
             instance_id=session.instance_id,
@@ -319,13 +312,18 @@ class DatabaseManager:
     def _disconnected_error(
         self,
         instance_id: str,
-        disconnected: _DisconnectedDatabase | None = None,
+        disconnected: str | None = None,
     ) -> NexusError:
         if disconnected is None:
             with self._lock:
                 disconnected = self._disconnected_instances.get(instance_id)
+                # The lease monitor sets connected=False before invoking our
+                # callback. A request can observe failure in that interval.
+                session = self._instances.get(instance_id)
+                if disconnected is None and session is not None:
+                    disconnected = session.handle.instance.idb_path
         if disconnected is not None:
-            database_state = probe_database_state(disconnected.requested_path)
+            database_state = probe_database_state(disconnected)
             if database_state["state"] == "crashed":
                 return DatabaseCrashedError(
                     f"database worker for instance {instance_id} crashed and left "
@@ -509,15 +507,15 @@ class DatabaseManager:
             if not session.handle.connected:
                 raise self._disconnected_error(target_id) from None
             raise
+        path = result.get("idb_path")
+        if not isinstance(path, str):
+            raise DatabaseSelectionError("save_database returned an invalid path")
         self._emit(
             "database_saved",
             instance_id=target_id,
             target=self._database_info(session),
             result=result,
         )
-        path = result.get("idb_path")
-        if not isinstance(path, str):
-            raise DatabaseSelectionError("save_database returned an invalid path")
         return SaveDatabaseResult(path=path)
 
     @staticmethod

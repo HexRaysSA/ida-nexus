@@ -443,6 +443,77 @@ def test_real_execution_timeout_and_cancellation_preserve_worker(
     assert handle.execute_python("6 * 7")["result"] == 42
 
 
+@pytest.mark.parametrize(
+    "code", ["raise ValueError('bad user code')", "raise SystemExit(19)"]
+)
+def test_user_python_failure_preserves_database_and_peer(source, open_handle, code):
+    writer = open_handle(source)
+    peer = open_handle(source)
+    writer.wait_autoanalysis(timeout=60)
+    writer.execute_python(RENAME.format(name="NEXUS_BEFORE_ERROR"))
+    with pytest.raises(RemoteError) as error:
+        writer.execute_python(code)
+    assert error.value.code == (
+        "system_exit" if "SystemExit" in code else "execution_failed"
+    )
+    assert writer.connected and peer.connected
+    assert peer.execute_python(READ_NAME)["result"] == "NEXUS_BEFORE_ERROR"
+    assert writer.execute_python("6 * 7")["result"] == 42
+    writer.save_database()
+    writer.close(wait_for_database=True, timeout=30)
+    assert not wait_database_released(peer.instance, timeout=0)
+    peer.close(wait_for_database=True, timeout=30)
+    assert (
+        open_handle(source).execute_python(READ_NAME)["result"] == "NEXUS_BEFORE_ERROR"
+    )
+
+
+def test_custom_output_reopen_and_fresh_replacement(source, open_handle):
+    output = source.parent / "chosen-name.i64"
+    first = open_handle(source, output_database=str(output))
+    first.wait_autoanalysis(timeout=60)
+    original_name = first.execute_python(READ_NAME)["result"]
+    first.execute_python(RENAME.format(name="NEXUS_CUSTOM_SAVED"))
+    first.save_database()
+    with pytest.raises(DatabaseBusyError):
+        open_handle(source, output_database=str(output), new_database=True)
+    assert first.execute_python(READ_NAME)["result"] == "NEXUS_CUSTOM_SAVED"
+    first.close(wait_for_database=True, timeout=30)
+    reopened = open_handle(source, output_database=str(output), image_base=0x800000)
+    assert reopened.execute_python(READ_NAME)["result"] == "NEXUS_CUSTOM_SAVED"
+    assert Path(reopened.instance.idb_path) == output
+    reopened.close(wait_for_database=True, timeout=30)
+    fresh = open_handle(source, output_database=str(output), new_database=True)
+    fresh.wait_autoanalysis(timeout=60)
+    assert fresh.execute_python(READ_NAME)["result"] == original_name
+    assert fresh.recovery == "none"
+    assert not source.with_name(source.name + ".i64").exists()
+
+
+def test_manager_crash_requires_explicit_reopen_and_keeps_other_database(
+    source, manager
+):
+    other = Path(shutil.copyfile(source, source.with_name("unaffected.elf")))
+    dead = manager.open_database(str(source), set_current=True)["instance_id"]
+    survivor = manager.open_database(str(other), set_current=False)["instance_id"]
+    manager.ensure_autoanalysis(dead)
+    manager.execute_python(RENAME.format(name="NEXUS_RECOVER_MANAGER"), dead)
+    with pytest.raises(DatabaseCrashedError):
+        manager.execute_python("import os; os._exit(74)", dead, flush_database=True)
+    wait_until(lambda: dead not in manager._instances)
+    with pytest.raises(DatabaseCrashedError):
+        manager.execute_python("1", dead)
+    assert manager.execute_python("6 * 7", survivor)["result"] == 42
+    replacement = manager.open_database(str(source), set_current=True)["instance_id"]
+    assert replacement != dead
+    assert (
+        manager.execute_python(READ_NAME, replacement)["result"]
+        == "NEXUS_RECOVER_MANAGER"
+    )
+    with pytest.raises(DatabaseSelectionError):
+        manager.execute_python("1", dead)
+
+
 def test_manager_selection_aliases_and_shutdown_save_every_database(
     source, manager, open_handle
 ):

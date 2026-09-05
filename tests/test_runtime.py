@@ -9,6 +9,7 @@ import pytest
 import ida_nexus._runtime as runtime_module
 from ida_nexus._runtime import (
     AnalysisState,
+    APIError,
     IDARuntime,
     IdbChangeState,
     PythonExecutionResult,
@@ -16,6 +17,54 @@ from ida_nexus._runtime import (
     create_idb_change_hook,
     reconcile_autoanalysis_state,
 )
+
+
+@pytest.mark.parametrize(
+    "backend,path,temporary,saved,error_code",
+    [
+        ("idalib", "", False, True, "no_database"),
+        ("idalib", "db.i64", False, False, "save_failed"),
+        ("gui", "db.i64", True, True, "save_as_required"),
+        ("gui", "db.i64", False, False, "save_failed"),
+        ("gui", "db.i64", False, True, None),
+    ],
+)
+def test_save_requires_database_and_respects_ida_failure_and_gui_save_as(
+    monkeypatch, backend, path, temporary, saved, error_code
+):
+    calls = []
+
+    def save(*args):
+        calls.append(args)
+        return saved
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_loader",
+        SimpleNamespace(
+            PATH_TYPE_IDB=0,
+            DBFL_TEMP=1,
+            get_path=lambda _kind: path,
+            is_database_flag=lambda _flag: temporary,
+            save_database=save,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules, "ida_kernwin", SimpleNamespace(process_ui_action=save)
+    )
+    runtime = object.__new__(IDARuntime)
+    runtime.backend = backend
+    # Isolate the IDA save contract; scheduler/transport are covered separately.
+    runtime._run_sync = lambda callback, **_kwargs: callback()
+    if error_code:
+        with pytest.raises(APIError) as error:
+            runtime.save_database()
+        assert error.value.code == error_code
+    else:
+        assert runtime.save_database()["saved"] is True
+    assert len(calls) == (0 if error_code in {"no_database", "save_as_required"} else 1)
+    if calls and backend == "gui":
+        assert calls == [("SaveBase",)]
 
 
 def test_analysis_state_can_settle_disabled_then_finish_analysis() -> None:

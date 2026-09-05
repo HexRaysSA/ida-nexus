@@ -51,6 +51,53 @@ def test_probe_database_state_distinguishes_disk_states(tmp_path: Path) -> None:
     assert unpacked["dirty"] is False
 
 
+@pytest.mark.parametrize("damage", ["truncated", "signature", "dirty-byte"])
+def test_damaged_header_is_indeterminate_and_never_recovered(tmp_path, damage):
+    source = tmp_path / "sample.bin"
+    source.write_bytes(b"input")
+    id0 = Path(expected_idb_path(source)).with_suffix(".id0")
+    write_id0(id0, dirty=True)
+    header = bytearray(id0.read_bytes())
+    if damage == "truncated":
+        header = header[: _B_TREE_HEADER_SIZE - 1]
+    elif damage == "signature":
+        header[_B_TREE_SIGNATURE_OFFSET] ^= 0xFF
+    else:
+        header[_B_TREE_DIRTY_OFFSET] = 2
+    id0.write_bytes(header)
+    assert probe_database_state(source)["state"] == "unknown"
+    with pytest.raises(DatabaseOpenError, match="indeterminate"):
+        resolver.resolve_instance(source)
+    assert id0.read_bytes() == header
+
+
+@pytest.mark.parametrize("failure", ["missing-component", "copy", "fsync"])
+def test_failed_backup_preserves_original_crash_components(
+    tmp_path, monkeypatch, failure
+):
+    source = tmp_path / "sample.bin"
+    source.write_bytes(b"input")
+    id0 = Path(expected_idb_path(source)).with_suffix(".id0")
+    write_id0(id0, dirty=True)
+    state = probe_database_state(source)
+    before = id0.read_bytes()
+    if failure == "missing-component":
+        state["unpacked_files"].append(str(tmp_path / "vanished.id1"))
+    else:
+
+        def fail(*_args, **_kwargs):
+            raise OSError("disk failure")
+
+        if failure == "copy":
+            monkeypatch.setattr(database_state.shutil, "copyfileobj", fail)
+        else:
+            monkeypatch.setattr(database_state.os, "fsync", fail)
+    with pytest.raises(OSError):
+        _backup_unpacked_database(state)
+    assert id0.read_bytes() == before
+    assert source.read_bytes() == b"input"
+
+
 def test_probe_database_state_refuses_ambiguous_components(tmp_path: Path) -> None:
     source = tmp_path / "sample.bin"
     source.write_bytes(b"input")

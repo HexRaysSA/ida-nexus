@@ -293,7 +293,11 @@ class DatabaseHandle:
         self._lease_socket: socket.socket | None = None
         self._lease_thread: threading.Thread | None = None
         self._idb_subscriptions: set[DatabaseChangeSubscription] = set()
-        self._install_lease(instance)
+        (
+            self._lease_connection,
+            self._lease_response,
+            self._lease_socket,
+        ) = self._open_lease(instance)
         thread = threading.Thread(
             target=self._monitor_lease,
             name=f"ida-nexus-lease-{instance.pid}",
@@ -494,30 +498,6 @@ class DatabaseHandle:
         lease_socket.settimeout(None)
         return connection, response, lease_socket
 
-    def _install_lease(self, entry: DatabaseInstance) -> None:
-        connection, response, lease_socket = self._open_lease(entry)
-        with self._lock:
-            if self._closed.is_set():
-                response.close()
-                connection.close()
-                raise NexusConnectionError("database handle is closed")
-            old_response = self._lease_response
-            old_connection = self._lease_connection
-            old_socket = self._lease_socket
-            self._instance = entry
-            self._lease_connection = connection
-            self._lease_response = response
-            self._lease_socket = lease_socket
-        if old_socket is not None:
-            try:
-                old_socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-        if old_response is not None:
-            old_response.close()
-        if old_connection is not None:
-            old_connection.close()
-
     @staticmethod
     def _crashed_database_state(entry: DatabaseInstance) -> dict[str, Any] | None:
         state = probe_database_state(entry.idb_path)
@@ -606,12 +586,10 @@ class DatabaseHandle:
             if self._closed.is_set():
                 raise NexusConnectionError("database handle is closed")
             connection = self._rpc_connection
-            if connection is not None and (
-                connection.port != entry.port
-                or (
-                    self._rpc_last_used is not None
-                    and now - self._rpc_last_used >= RPC_CONNECTION_MAX_IDLE_SECONDS
-                )
+            if (
+                connection is not None
+                and self._rpc_last_used is not None
+                and now - self._rpc_last_used >= RPC_CONNECTION_MAX_IDLE_SECONDS
             ):
                 stale = connection
                 connection = None
