@@ -17,6 +17,7 @@ ida-nexus = "ida_nexus.cli:main"
 
 [dependency-groups]
 dev = [
+    "coverage-flashlight",
     "pytest>=9.0.3",
     "ruff>=0.12.0",
 ]
@@ -38,6 +39,35 @@ markers = [
     "idalib_e2e: real IDA workers; requires installed IDA and configured idalib",
 ]
 
+[tool.coverage.run]
+source = ["ida_nexus"]
+branch = true
+core = "ctrace"
+relative_files = true
+parallel = true
+# Follow the console launcher and detached IDA workers. Save coverage before
+# the crash tests' os._exit(), without running IDA's normal shutdown handlers.
+patch = ["subprocess", "_exit"]
+
+[tool.coverage-flashlight]
+source = ["ida_nexus"]
+trace-source = ["ida_nexus", "tests"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+
+[tool.coverage.html]
+directory = "htmlcov"
+show_contexts = true
+
+[tool.coverage.json]
+output = "htmlcov/coverage.json"
+show_contexts = true
+
 [tool.pyright]
 # IDAPython modules provide type information but are importable only inside IDA.
 reportMissingModuleSource = "none"
+
+[tool.uv.sources]
+coverage-flashlight = { path = "../coverage-flashlight", editable = true }

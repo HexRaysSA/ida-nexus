@@ -10,6 +10,11 @@ wheels/
 .venv
 node_modules/
 
+# Local coverage measurements and reports
+.coverage
+.coverage.*
+htmlcov/
+
 # Runtime logs
 .ida-codemode/
 
