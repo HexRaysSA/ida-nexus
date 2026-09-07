@@ -93,6 +93,10 @@ new source file. They do not reconfigure a reused GUI, worker, or existing IDB.
 For a newly spawned worker, `auto_analysis=True` starts sliced analysis
 after the worker is published. Low-level `execute_python()` calls can run
 between slices, while `wait_autoanalysis()` explicitly drains the same lifecycle.
+After a successful explicit wait, both runtime and persistent autoanalysis stay
+enabled, including when initial analysis had already finished. This setting is
+saved with the database. Failed or cancelled waits restore the prior settings;
+polling and background slices do not opt into this policy.
 The MCP intentionally waits before model-authored execution.
 A persistently disabled GUI reports an immediately usable `disabled` analysis
 status without confusing IDA's temporary suspension during GUI actions.

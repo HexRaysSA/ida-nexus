@@ -28,10 +28,20 @@ def gui_runtime(monkeypatch):
     gui_thread = threading.get_ident()
     queued = Queue()
     native_cancellations = []
+    auto = SimpleNamespace(st_Ready=0, st_Think=1, st_Work=3, state=0)
+
+    def set_ida_state(state):
+        previous, auto.state = auto.state, state
+        return previous
+
+    auto.set_ida_state = set_ida_state
+    # Deliberately expose no enable_auto(): status repair must not run analysis.
+    monkeypatch.setitem(sys.modules, "ida_auto", auto)
 
     def execute_sync(callback, flags):
         if flags == 2:  # MFF_WRITE, invoked by the test's GUI thread
             assert threading.get_ident() == gui_thread
+            assert auto.state != auto.st_Work, "MFF_WRITE blocked by IDA busy status"
             return callback()
         assert flags == 8  # MFF_FAST | MFF_NOWAIT
         queued.put(callback)
@@ -67,6 +77,37 @@ def gui_runtime(monkeypatch):
         idb_change_state=IdbChangeState(),
     )
     return runtime, queued, native_cancellations
+
+
+@pytest.mark.parametrize("initial_state", [0, 1])
+@pytest.mark.parametrize(
+    "failure", [None, ValueError("save raised"), APIError("save_failed", "save failed")]
+)
+def test_gui_save_restores_status_before_next_write(
+    gui_runtime, initial_state, failure
+):
+    runtime, _, _ = gui_runtime
+    auto = sys.modules["ida_auto"]
+    auto.set_ida_state(initial_state)
+
+    def save():
+        # IDA's save path leaves this status behind when analysis is disabled.
+        auto.set_ida_state(auto.st_Work)
+        if failure is not None:
+            raise failure
+        return {"saved": True}
+
+    if failure is None:
+        assert runtime._run_sync(save, kind="save", timeout=1) == {"saved": True}
+    else:
+        with pytest.raises(APIError) as error:
+            runtime._run_sync(save, kind="save", timeout=1)
+        assert error.value.code == (
+            failure.code if isinstance(failure, APIError) else "execution_failed"
+        )
+    assert auto.state == initial_state
+    assert runtime._run_sync(lambda: 42, kind="execute", timeout=1) == 42
+    assert auto.state == initial_state
 
 
 @pytest.mark.parametrize("dispatch_during_successor", [False, True])
@@ -484,53 +525,79 @@ def test_autoanalysis_slices_release_before_completion(
     ]
 
 
-def test_explicit_wait_advances_disabled_barrier_to_complete(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _inline_runtime(monkeypatch)
-    runtime.analysis_state = AnalysisState()
-    runtime.analysis_state.mark_complete("disabled")
-    calls: list[object] = []
+@pytest.fixture
+def waiting_runtime(gui_runtime, monkeypatch):
+    runtime, _, _ = gui_runtime
+    flags = SimpleNamespace(enabled=False, persistent=False, waits=0)
 
-    def enable_auto(enabled: bool) -> bool:
-        calls.append(("enable", enabled))
+    def enable_auto(enabled):
+        previous, flags.enabled = flags.enabled, enabled
+        return previous
+
+    def auto_wait():
+        assert flags.enabled
+        flags.waits += 1
+        return True
+
+    auto = sys.modules["ida_auto"]
+    auto.enable_auto = enable_auto
+    auto.auto_wait = auto_wait
+    auto.auto_is_ok = lambda: True
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_ida",
+        SimpleNamespace(
+            inf_is_auto_enabled=lambda: flags.persistent,
+            inf_set_auto_enabled=lambda value: setattr(flags, "persistent", value),
+        ),
+    )
+    return runtime, flags, auto
+
+
+@pytest.mark.parametrize("initial_status", ["running", "disabled", "complete"])
+@pytest.mark.parametrize("initial_flags", [(False, False), (False, True), (True, True)])
+def test_explicit_wait_enables_ongoing_analysis_even_after_completion(
+    waiting_runtime, initial_status, initial_flags
+):
+    runtime, flags, _ = waiting_runtime
+    flags.enabled, flags.persistent = initial_flags
+    if initial_status != "running":
+        runtime.analysis_state.mark_complete(initial_status)
+    assert runtime.wait_autoanalysis(1) == {"status": "complete", "complete": True}
+    assert flags.enabled and flags.persistent
+    assert flags.waits == 1  # Even an already-complete barrier must synchronize.
+
+
+@pytest.mark.parametrize("initial_status", ["disabled", "complete"])
+@pytest.mark.parametrize("initial_flags", [(False, False), (False, True), (True, True)])
+@pytest.mark.parametrize("failure", ["cancelled", "exception", "timeout"])
+def test_failed_explicit_wait_restores_analysis_settings(
+    waiting_runtime, initial_status, initial_flags, failure
+):
+    runtime, flags, auto = waiting_runtime
+    flags.enabled, flags.persistent = initial_flags
+    runtime.analysis_state.mark_complete(initial_status)
+
+    def failed_wait():
+        if failure == "exception":
+            raise ValueError("analysis failed")
+        if failure == "timeout":
+            time.sleep(0.15)
         return False
 
-    monkeypatch.setitem(
-        sys.modules,
-        "ida_auto",
-        SimpleNamespace(
-            enable_auto=enable_auto,
-            auto_wait=lambda: calls.append(("wait",)) or True,
-            auto_is_ok=lambda: True,
-        ),
+    auto.auto_wait = failed_wait
+    with pytest.raises(APIError) as error:
+        runtime.wait_autoanalysis(0.02 if failure == "timeout" else 1)
+    assert (
+        error.value.code
+        == {
+            "cancelled": "analysis_cancelled",
+            "exception": "execution_failed",
+            "timeout": "operation_timeout",
+        }[failure]
     )
-
-    assert runtime.wait_autoanalysis(None) == {
-        "status": "complete",
-        "complete": True,
-    }
-    assert calls == [("enable", True), ("wait",), ("enable", False)]
-
-
-def test_cancelled_explicit_wait_does_not_accept_disabled_barrier(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _inline_runtime(monkeypatch)
-    runtime.analysis_state = AnalysisState()
-    runtime.analysis_state.mark_complete("disabled")
-    monkeypatch.setitem(
-        sys.modules,
-        "ida_auto",
-        SimpleNamespace(
-            enable_auto=lambda _enabled: False,
-            auto_wait=lambda: False,
-            auto_is_ok=lambda: False,
-        ),
-    )
-
-    with pytest.raises(runtime_module.APIError, match="cancelled"):
-        runtime.wait_autoanalysis(None)
+    assert (flags.enabled, flags.persistent) == initial_flags
+    assert runtime.analysis_state.snapshot()["status"] == initial_status
 
 
 def test_execution_operation_metadata_is_scoped_to_hook(

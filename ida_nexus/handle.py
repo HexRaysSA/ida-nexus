@@ -774,10 +774,11 @@ class DatabaseHandle:
         *,
         operation_id: str | None = None,
     ) -> AnalysisResult:
-        """Wait for initial autoanalysis through the public Nexus route.
+        """Drain autoanalysis and leave ongoing analysis enabled on success.
 
-        This also explicitly analyzes a GUI barrier previously settled as
-        ``disabled``, while restoring the prior temporary runtime state afterward.
+        This also enables the persistent database setting, even if initial
+        analysis already finished. A failed or cancelled wait restores the
+        previous persistent and runtime settings.
         """
         payload: dict[str, Any] = {}
         if timeout is not None:

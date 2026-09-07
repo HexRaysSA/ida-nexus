@@ -180,8 +180,8 @@ def _build_ida_options(args: argparse.Namespace, options_type: Any) -> Any:
 
     return options_type(
         # idalib's run_auto_analysis=True blocks Database.open() until analysis
-        # finishes. Always defer there so Nexus can publish first; the worker
-        # starts the same wait operation asynchronously after registration.
+        # finishes. Defer so Nexus can publish first and advance analysis in
+        # background slices. An explicit wait later enables ongoing analysis.
         auto_analysis=False,
         loading_address=_image_base_to_paragraphs(args.image_base),
         new_database=args.new_database,

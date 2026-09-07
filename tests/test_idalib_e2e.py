@@ -281,6 +281,65 @@ with Database.open(str(source)) as db:
     assert reopened.execute_python("len(list(db.functions))")["result"] > 0
 
 
+@pytest.mark.parametrize("background_analysis", [False, True])
+def test_explicit_wait_enables_analysis_and_persists_to_saved_database(
+    source, open_handle, background_analysis
+):
+    handle = open_handle(source, auto_analysis=background_analysis)
+    if background_analysis:
+        wait_until(lambda: handle.poll_autoanalysis()["status"] == "complete")
+    flags = (
+        "import ida_auto, ida_ida; "
+        "[ida_auto.is_auto_enabled(), ida_ida.inf_is_auto_enabled()]"
+    )
+    assert handle.execute_python(flags)["result"] == [False, False]
+    assert handle.wait_autoanalysis(timeout=60)["status"] == "complete"
+    assert handle.execute_python(flags)["result"] == [True, True]
+
+    # An explicit later wait must drain new work and enable analysis again,
+    # even though the initial barrier remains complete.
+    handle.execute_python(
+        "import ida_auto, ida_ida; "
+        "ida_ida.inf_set_auto_enabled(False); ida_auto.enable_auto(False); "
+        "ida_auto.auto_mark_range(ida_ida.inf_get_min_ea(), "
+        "ida_ida.inf_get_min_ea() + 16, ida_auto.AU_USED)"
+    )
+    assert (
+        handle.execute_python("import ida_auto; ida_auto.auto_is_ok()")["result"]
+        is False
+    )
+    assert handle.wait_autoanalysis(timeout=60)["status"] == "complete"
+    assert handle.execute_python(flags)["result"] == [True, True]
+    assert (
+        handle.execute_python("import ida_auto; ida_auto.auto_is_ok()")["result"]
+        is True
+    )
+    saved = handle.save_database()["idb_path"]
+    handle.close(wait_for_database=True, timeout=30)
+
+    # Inspect the persisted flag without Nexus's worker startup -a override.
+    reopened = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, idapro; "
+                "assert idapro.open_database(sys.argv[1], False) == 0; "
+                "import ida_ida; "
+                "assert ida_ida.inf_is_auto_enabled(); "
+                "idapro.close_database(False)"
+            ),
+            saved,
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    assert reopened.returncode == 0, reopened.stdout + reopened.stderr
+
+
 def test_deferred_analysis_namespaces_and_real_idb_events(source, open_handle):
     writer = open_handle(source, auto_analysis=False)
     observer = open_handle(source)

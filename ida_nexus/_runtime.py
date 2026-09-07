@@ -580,6 +580,7 @@ class IDARuntime:
             def invoke() -> int:
                 nonlocal outcome
                 old_batch: int | None = None
+                old_ida_state: int | None = None
                 deadline_token: int | None = None
                 ida_kernwin.clr_cancelled()
                 stdout_capture = io.StringIO()
@@ -620,6 +621,16 @@ class IDARuntime:
                                 self._active_thread_id = None
 
                 try:
+                    if self.backend == "gui":
+                        import ida_auto
+
+                        # HACK: IDA 9.4 GUI saves leave the status at st_Work
+                        # when autoanalysis is disabled, blocking later
+                        # MFF_WRITE requests. Preserve/restore the status around
+                        # every operation, including saves in execute_python.
+                        # Do not enable analysis: that can drain pending queues.
+                        # Remove once the underlying IDA status bug is fixed.
+                        old_ida_state = ida_auto.set_ida_state(ida_auto.st_Work)
                     if batch:
                         old_batch = idc.batch(1)
                     if effective_timeout is not None:
@@ -685,6 +696,8 @@ class IDARuntime:
                     ida_kernwin.clr_cancelled()
                     if old_batch is not None:
                         idc.batch(old_batch)
+                    if old_ida_state is not None:
+                        ida_auto.set_ida_state(old_ida_state)
                 return 1
 
             try:
@@ -945,31 +958,35 @@ class IDARuntime:
 
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]:
         import ida_auto
-
-        initial_status = self.analysis_state.snapshot()
-        if initial_status["complete"] and initial_status["status"] == "complete":
-            return initial_status
+        import ida_ida
 
         def wait() -> bool:
+            previously_persistent = ida_ida.inf_is_auto_enabled()
             previously_enabled = ida_auto.enable_auto(True)
+            completed = False
             try:
-                completed = bool(ida_auto.auto_wait())
-            finally:
-                if not previously_enabled:
-                    ida_auto.enable_auto(False)
-            if completed and ida_auto.auto_is_ok():
+                if not ida_auto.auto_wait() or not ida_auto.auto_is_ok():
+                    return False
+                # An explicit successful wait opts into normal ongoing analysis,
+                # including when startup slices already completed the barrier.
+                ida_ida.inf_set_auto_enabled(True)
+                ida_auto.enable_auto(True)
                 self.analysis_state.mark_complete()
-            return completed
+                completed = True
+                return True
+            finally:
+                if not completed:
+                    ida_ida.inf_set_auto_enabled(previously_persistent)
+                    ida_auto.enable_auto(previously_enabled)
 
         completed = self._run_sync(wait, kind="analysis", timeout=timeout)
-        status = self.analysis_state.snapshot()
-        if not completed and status["status"] != "complete":
+        if not completed:
             raise APIError(
                 "analysis_cancelled",
                 "Autoanalysis was cancelled before completion",
                 status=409,
             )
-        return status
+        return self.analysis_state.snapshot()
 
     def save_database(self) -> dict[str, Any]:
         import ida_kernwin

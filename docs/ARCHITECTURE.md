@@ -295,7 +295,7 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `POST /shutdown_database` | `{lease_id, save}`; the active lease must be exclusive and own a managed idalib worker. Success is `{"ok":true,"result":{"shutting_down":true,"save":bool}}`, after which teardown uses `Database.close(save=save)`. |
 | `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object; accepts an optional `lease_id` query value so handle polling counts as lease activity. Observing it never enables or advances analysis. `status` is `running`, `complete`, or `disabled`. A persistently disabled GUI settles the barrier as `disabled` with `complete: true`; temporary GUI-action suspension does not. |
-| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts optional `timeout`, `lease_id`, and `operation_id` fields. An omitted timeout waits without a deadline. An explicit wait advances a `disabled` barrier by temporarily enabling the runtime analyzer without changing the persistent GUI setting. |
+| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts optional `timeout`, `lease_id`, and `operation_id` fields. An omitted timeout waits without a deadline. A successful explicit wait drains current analysis and leaves both runtime and persistent analysis enabled, even after initial completion. Failed or cancelled waits restore the prior settings. |
 
 Request-owned cancellation requires registry protocol version 3. Version 4 adds
 opt-in lease-scoped persistent Python namespaces. Version 5 requires execution
