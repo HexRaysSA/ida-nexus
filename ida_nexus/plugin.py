@@ -129,7 +129,8 @@ class _NexusPluginComponent:
         from ida_domain import Database
 
         database = Database.open()
-        identity = InstanceIdentity(idb_path=idb_path, exe_path=exe_path, backend="gui")
+        identity = InstanceIdentity(idb_path=idb_path, exe_path=exe_path, backend="gui",
+                                    managed=os.environ.get("IDA_NEXUS_GUI_LAUNCHED") == "1")
         runtime = IDARuntime(
             backend="gui",
             database=database,
