@@ -514,9 +514,32 @@ class IDARuntime:
                 return
             self._active_interrupt_error = error
             self._active_cancel_event.set()
-            ida_kernwin.set_cancelled()
+            if self.backend != "gui":
+                ida_kernwin.set_cancelled()
             if self._active_thread_id is not None:
                 _interrupt_thread(self._active_thread_id)
+
+        if self.backend == "gui":
+            # set_cancelled() marshals to the GUI thread. Waiting for it while
+            # holding _active_lock deadlocks when user code returns and tries
+            # to acquire that lock. Queue the native flag without waiting;
+            # Python interruption above can take effect as soon as Python runs.
+            def cancel_native() -> int:
+                with self._active_lock:
+                    # The request may already have finished, or a successor
+                    # may be running by the time IDA dispatches this callback.
+                    if (
+                        self._active_generation == generation
+                        and self._active_kind == kind
+                        and self._active_interrupt_error is error
+                        and self._active_thread_id is not None
+                    ):
+                        ida_kernwin.set_cancelled()
+                return 1
+
+            ida_kernwin.execute_sync(
+                cancel_native, ida_kernwin.MFF_FAST | ida_kernwin.MFF_NOWAIT
+            )
 
     def _run_sync(
         self,

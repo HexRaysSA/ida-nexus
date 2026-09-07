@@ -99,6 +99,10 @@ status without confusing IDA's temporary suspension during GUI actions.
 `execute_python()` is stateless by default; pass `persist_globals=True` to keep
 a lease-scoped Python namespace between calls.
 
+Execution timeouts request interruption rather than forcibly terminating native
+calls. A blocking call such as `time.sleep()` may finish before Python receives
+the timeout exception.
+
 ### Crash detection and recovery
 
 `execute_python()` never retries after a connection failure because the code may

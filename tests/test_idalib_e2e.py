@@ -417,13 +417,14 @@ def test_worker_crash_invalidates_handle_and_recovers_database(
         assert backups == []
 
 
+@pytest.mark.parametrize("code", ["while True: pass", "import time; time.sleep(1)"])
 def test_real_execution_timeout_and_cancellation_preserve_worker(
-    source, open_handle, tmp_path
+    source, open_handle, tmp_path, code
 ):
     handle = open_handle(source)
     handle.wait_autoanalysis(timeout=60)
     with pytest.raises(RemoteError) as error:
-        handle.execute_python("while True: pass", timeout=0.2)
+        handle.execute_python(code, timeout=0.2)
     assert error.value.code == "operation_timeout"
     assert handle.execute_python("6 * 7")["result"] == 42
 

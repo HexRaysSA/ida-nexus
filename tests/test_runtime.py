@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
+from queue import Queue
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,6 +20,102 @@ from ida_nexus._runtime import (
     create_idb_change_hook,
     reconcile_autoanalysis_state,
 )
+
+
+@pytest.fixture
+def gui_runtime(monkeypatch):
+    """Model IDA's UI dispatch without marshalling calls on worker threads."""
+    gui_thread = threading.get_ident()
+    queued = Queue()
+    native_cancellations = []
+
+    def execute_sync(callback, flags):
+        if flags == 2:  # MFF_WRITE, invoked by the test's GUI thread
+            assert threading.get_ident() == gui_thread
+            return callback()
+        assert flags == 8  # MFF_FAST | MFF_NOWAIT
+        queued.put(callback)
+        return 1
+
+    def set_cancelled():
+        # Real IDA would marshal this call and potentially deadlock. Fail
+        # directly so regressions cannot leave the test runner hanging.
+        assert threading.get_ident() == gui_thread
+        native_cancellations.append(True)
+
+    monkeypatch.setitem(sys.modules, "ida_domain", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules, "idaapi", SimpleNamespace(get_kernel_version=lambda: "9.4")
+    )
+    monkeypatch.setitem(sys.modules, "idc", SimpleNamespace(batch=lambda _value: 0))
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_kernwin",
+        SimpleNamespace(
+            MFF_FAST=0,
+            MFF_WRITE=2,
+            MFF_NOWAIT=8,
+            execute_sync=execute_sync,
+            set_cancelled=set_cancelled,
+            clr_cancelled=lambda: None,
+        ),
+    )
+    runtime = IDARuntime(
+        backend="gui",
+        database=object(),
+        analysis_state=AnalysisState(),
+        idb_change_state=IdbChangeState(),
+    )
+    return runtime, queued, native_cancellations
+
+
+@pytest.mark.parametrize("dispatch_during_successor", [False, True])
+def test_gui_timeout_recovers_after_sleep_and_ignores_late_native_cancel(
+    gui_runtime, dispatch_during_successor
+):
+    runtime, queued, native_cancellations = gui_runtime
+    with pytest.raises(APIError) as error:
+        runtime._run_sync(lambda: time.sleep(0.15), kind="execute", timeout=0.02)
+    assert error.value.code == "operation_timeout"
+    assert error.value.status == 408
+    cancel_native = queued.get(timeout=2)
+    if not dispatch_during_successor:
+        cancel_native()
+
+    def successor():
+        if dispatch_during_successor:
+            cancel_native()
+        return 42
+
+    assert runtime._run_sync(successor, kind="execute", timeout=1) == 42
+    assert native_cancellations == []
+
+
+def test_gui_cancellation_sets_native_flag_on_gui_thread_once(gui_runtime, monkeypatch):
+    runtime, queued, native_cancellations = gui_runtime
+    python_interruptions = []
+    # Model a native operation that pumps UI requests before returning to
+    # Python, where its asynchronous Python exception would be delivered.
+    monkeypatch.setattr(
+        runtime_module, "_interrupt_thread", python_interruptions.append
+    )
+
+    def operation():
+        worker = threading.Thread(target=runtime.cancel_active, daemon=True)
+        worker.start()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        queued.get(timeout=2)()
+        assert native_cancellations == [True]
+        runtime.cancel_active()
+        assert queued.empty()
+        raise runtime_module._OperationInterrupt
+
+    with pytest.raises(APIError) as error:
+        runtime._run_sync(operation, kind="execute", timeout=None)
+    assert error.value.code == "operation_cancelled"
+    assert python_interruptions == [threading.get_ident()]
+    assert runtime._run_sync(lambda: 42, kind="execute", timeout=1) == 42
 
 
 @pytest.mark.parametrize(
