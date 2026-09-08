@@ -15,6 +15,7 @@ _COMMAND_HELP = {
 }
 
 _COMMAND_HIDDEN = (
+    "migrate-worker",
     "worker",
     "benchmark",
     "exec",
@@ -45,6 +46,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _command(name: str) -> Callable[[list[str] | None], int]:
+    if name == "migrate-worker":
+        from .._migration import main
+        return main
     # Imports are intentionally lazy so lightweight commands do not initialize
     # the MCP server, dashboard, or idalib-facing modules unnecessarily.
     if name == "mcp":

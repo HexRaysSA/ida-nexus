@@ -1,9 +1,12 @@
 import argparse
 import importlib
+import json
 import math
 import os
 import signal
 import sys
+import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -220,6 +223,17 @@ def _build_ida_options(args: argparse.Namespace, options_type: Any) -> Any:
     )
 
 
+def _log_database_state(event: str, path: Path, **details: Any) -> None:
+    """Record file state at native lifecycle boundaries without reading IDB contents."""
+    record = {"event": event, "time_ns": time.time_ns(), "path": str(path), **details}
+    try:
+        stat = path.stat()
+        record.update(size=stat.st_size, modified_ns=stat.st_mtime_ns)
+    except OSError as exc:
+        record["stat_error"] = str(exc)
+    print("[ida-nexus] " + json.dumps(record), flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     # This must happen before probe() imports idapro and reads ida-config.json.
     # It is process-local; the MCP server and its parent retain the full path.
@@ -270,12 +284,16 @@ def main(argv: list[str] | None = None) -> int:
     import ida_kernwin
     import ida_loader
     import ida_nalt
+    import idapro
     from ida_domain import Database
     from ida_domain.database import IdaCommandOptions
 
     # serve()/stop_serving() are available in IDA 9.4+, but older idapro
     # stubs from the pinned ida-domain Git branch do not declare them.
     kernwin: Any = ida_kernwin
+    # idalib suppresses native output by default. stdout/stderr already point
+    # at this worker's private log, so keep initialization errors there too.
+    idapro.enable_console_messages(True)
 
     analysis_state = AnalysisState()
     analysis_hook: Any | None = None
@@ -296,13 +314,17 @@ def main(argv: list[str] | None = None) -> int:
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous_handlers[signum] = signal.signal(signum, request_stop)
 
+    phase = "opening"
     try:
         options = _build_ida_options(args, IdaCommandOptions)
+        _log_database_state("database.open_started", input_path, ida_version=idapro.get_library_version())
         database = Database.open(
             str(input_path),
             args=options,
             save_on_close=True,
         )
+        phase = "initializing"
+        _log_database_state("database.opened", input_path)
         if args.save_after_open:
             recovered_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB) or ""
             if not recovered_path or not ida_loader.save_database(recovered_path, 0):
@@ -327,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         runtime = IDARuntime(
             backend="idalib",
+            auto_analysis_policy=args.auto_analysis,
             database=database,
             analysis_state=analysis_state,
             idb_change_state=idb_change_state,
@@ -344,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.auto_analysis:
             server.start_autoanalysis()
         print(f"[ida-nexus] {server.url}", flush=True)
+        phase = "serving"
 
         # In IDA 9.4+, serve() dispatches execute_sync requests from HTTP
         # threads until managed lease shutdown or a signal calls
@@ -353,7 +377,9 @@ def main(argv: list[str] | None = None) -> int:
             kernwin.serve()
         return 128 + stop_signal if stop_signal is not None else 0
     except Exception as exc:  # noqa: BLE001 -- IDA initialization is third-party code
+        _log_database_state("database.worker_failed", input_path, phase=phase, error_type=type(exc).__name__, error=str(exc))
         print(f"[ida-nexus] {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return 1
     finally:
         if server is not None:
@@ -387,7 +413,10 @@ def main(argv: list[str] | None = None) -> int:
                 # We are back on the idalib main thread after serve(). A remote
                 # exclusive shutdown may explicitly request that changes be discarded.
                 save = getattr(server, "save_on_shutdown", True)
+                closing_path = Path(ida_loader.get_path(ida_loader.PATH_TYPE_IDB) or input_path)
+                _log_database_state("database.close_started", closing_path, save=save)
                 database.close(save=save)
+                _log_database_state("database.closed", closing_path, save=save)
                 runtime.database = None
             except Exception as exc:  # noqa: BLE001 -- SWIG may raise arbitrary errors
                 print(

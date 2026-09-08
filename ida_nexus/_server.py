@@ -13,7 +13,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs
 
 from ._http import HOST, HTTPResponse, LocalHTTPServer, json_response
-from ._registry import DatabaseInstance, InstanceIdentity, InstanceRegistration
+from ._registry import DatabaseInstance, InstanceIdentity, InstanceRegistration, idb_key
 from ._runtime import USER_CODE_FILENAME, AnalysisState, APIError
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,10 @@ class _Lease:
 
 
 class NexusBackend(Protocol):
+    def prepare_migration(self, timeout: float) -> dict[str, Any]: ...
+
+    def cancel_migration(self) -> None: ...
+
     def execute_python(
         self,
         code: str,
@@ -110,6 +114,19 @@ class NexusHTTPServer:
         self._draining = False
         self._shutdown_requested = False
         self._save_on_shutdown = True
+        self._migration: str | None = None
+        self._migration_saved = False
+        self._migration_lock = threading.Lock()
+        self._migration_releasing = False
+        self._handoff_leases: set[str] = set()
+        self._handoff_deadline = 0.0
+        handoff = os.environ.pop("IDA_NEXUS_HANDOFF", "")
+        if handoff:
+            value = json.loads(handoff)
+            if value["idb_key"] != idb_key(identity.idb_path):
+                raise ValueError("Handoff reservations belong to another database")
+            self._handoff_leases = set(value["leases"])
+            self._handoff_deadline = time.monotonic() + 30
         self._active_leases = 0
         self._active_requests = 0
         self._leases: dict[str, _Lease] = {}
@@ -146,6 +163,13 @@ class NexusHTTPServer:
         """Whether the lifecycle owner should persist the database during teardown."""
         with self._activity:
             return self._save_on_shutdown
+
+    @property
+    def client_count(self) -> int:
+        """Number of connected library leases, excluding event subscriptions."""
+        with self._activity:
+            self._pending_handoffs()
+            return self._active_leases + len(self._handoff_leases)
 
     def start(self) -> None:
         with self._lock:
@@ -230,6 +254,9 @@ class NexusHTTPServer:
             with self._activity:
                 if self._draining or self._shutdown_requested:
                     return False
+                if self._migration:
+                    self._activity.wait(_AUTOANALYSIS_SCHEDULER_YIELD_SECONDS)
+                    continue
                 if self._foreground_waiters == 0 and self._backend_lock.acquire(
                     blocking=False
                 ):
@@ -339,7 +366,9 @@ class NexusHTTPServer:
 
                     shutdown_at = self._shutdown_at
                     eligible = (
-                        self._active_leases == 0
+                        not self._migration
+                        and not self._pending_handoffs()
+                        and self._active_leases == 0
                         and self._active_requests == 0
                         and shutdown_at is not None
                     )
@@ -377,7 +406,12 @@ class NexusHTTPServer:
         idle_timeout: float | None = None,
     ) -> _Lease | None:
         with self._activity:
-            if self._draining or self._shutdown_requested or lease_id in self._leases:
+            if (
+                self._draining
+                or self._shutdown_requested
+                or self._migration
+                or lease_id in self._leases
+            ):
                 return None
             lease = _Lease(
                 keepalive=keepalive,
@@ -390,6 +424,7 @@ class NexusHTTPServer:
                 ),
             )
             self._leases[lease_id] = lease
+            self._handoff_leases.discard(lease_id)
             self._active_leases = len(self._leases)
             self._shutdown_at = None
             self._activity.notify_all()
@@ -417,13 +452,25 @@ class NexusHTTPServer:
             shutdown_pending = False
             if self._active_leases == 0:
                 self._shutdown_at = time.monotonic() + lease.keepalive
-                if self.identity.managed and lease.keepalive == 0:
+                if (
+                    self.identity.managed
+                    and lease.keepalive == 0
+                    and not self._migration
+                    and not self._pending_handoffs()
+                ):
                     # Make a zero-keepalive final release deterministic: reject
                     # a racing replacement lease while existing work unwinds.
                     self._shutdown_requested = True
                     shutdown_pending = True
             self._activity.notify_all()
             return True, shutdown_pending
+
+    def _pending_handoffs(self) -> bool:
+        # Reconnected clients may immediately close. Do not let the first one
+        # terminate the target while slower source clients are still rebinding.
+        if time.monotonic() >= self._handoff_deadline:
+            self._handoff_leases.clear()
+        return bool(self._handoff_leases)
 
     def _finish_lease_close(self, lease_id: str) -> None:
         try:
@@ -450,6 +497,12 @@ class NexusHTTPServer:
 
     def _request_started(self, lease_id: str | None) -> None:
         with self._activity:
+            if self._migration:
+                raise APIError(
+                    "migrating",
+                    "Database ownership is changing; this request was not admitted",
+                    status=503,
+                )
             if self._draining or self._shutdown_requested:
                 raise APIError(
                     "instance_draining", "The instance is shutting down", status=503
@@ -583,7 +636,7 @@ class NexusHTTPServer:
                     "Only managed idalib workers can be shut down remotely",
                     status=409,
                 )
-            if set(self._leases) != {lease_id}:
+            if set(self._leases) != {lease_id} or self._pending_handoffs():
                 raise APIError(
                     "instance_shared",
                     "The managed worker has another active lease",
@@ -622,7 +675,120 @@ class NexusHTTPServer:
                 "The instance has not finished registration",
                 status=503,
             )
-        return {"status": "ok", **entry.health_identity()}
+        return {
+            "status": "ok",
+            **entry.health_identity(),
+            **({"transition": self._migration} if self._migration else {}),
+        }
+
+    def _cancel_migration(self, transition: str) -> None:
+        # Also used by the deadline watchdog if the coordinator disappears.
+        with self._migration_lock:
+            if self._migration != transition or self._migration_releasing:
+                return
+            if self._migration_saved:
+                self._run_operation(None, self.backend.cancel_migration)
+            with self._activity:
+                self._migration = None
+                self._migration_saved = False
+                self._activity.notify_all()
+
+    def _migration_deadline(self, transition: str, deadline: float) -> None:
+        if not self._stream_stop.wait(max(0, deadline - time.time()) + 5):
+            try:
+                self._cancel_migration(transition)
+            except Exception:
+                logger.exception("Could not restore admission after migration deadline")
+
+    def _migration_operation(self, path: str, payload: dict) -> HTTPResponse:
+        from ._migration import transition_for
+
+        record = transition_for(self._entry) if self._entry else None
+        transition = payload.get("transition")
+        if not record or record["id"] != transition:
+            raise APIError(
+                "invalid_transition", "No authenticated migration record", status=409
+            )
+        if path == "/migration/cancel":
+            self._cancel_migration(transition)
+            return self._success({"cancelled": True})
+        with self._migration_lock:
+            if path == "/migration/prepare":
+                timeout = float(payload.get("timeout", 120))
+                if not math.isfinite(timeout) or not 0 < timeout <= 600:
+                    raise APIError(
+                        "invalid_timeout",
+                        "Migration timeout must be between 0 and 600 seconds",
+                    )
+                deadline = time.monotonic() + timeout
+                with self._activity:
+                    if self._draining or self._shutdown_requested or self._migration:
+                        raise APIError(
+                            "instance_busy",
+                            "The database is already closing or migrating",
+                            status=409,
+                        )
+                    if time.time() >= record["deadline"]:
+                        raise APIError(
+                            "invalid_transition",
+                            "The migration deadline has expired",
+                            status=409,
+                        )
+                    self._migration = transition
+                    self._activity.notify_all()
+                    threading.Thread(
+                        target=self._migration_deadline,
+                        args=(transition, record["deadline"]),
+                        daemon=True,
+                    ).start()
+                    while self._active_requests:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise APIError(
+                                "migration_busy",
+                                "Timed out draining accepted operations",
+                                status=409,
+                            )
+                        self._activity.wait(min(remaining, 0.1))
+                result = self._run_operation(
+                    None,
+                    lambda: self.backend.prepare_migration(
+                        max(0.1, deadline - time.monotonic())
+                    ),
+                )
+                self._migration_saved = True
+                with self._activity:
+                    self._pending_handoffs()
+                    result = {**result, "leases": list(set(self._leases) | self._handoff_leases)}
+                return self._success(result)
+            if self._migration != transition:
+                raise APIError(
+                    "invalid_transition",
+                    "Transition no longer owns admission",
+                    status=409,
+                )
+            if path == "/migration/release":
+                if not self._migration_saved or self._migration_releasing:
+                    raise APIError(
+                        "migration_unsaved",
+                        "Database is not prepared for release",
+                        status=409,
+                    )
+                self._save_on_shutdown = False
+                self._migration_releasing = True
+
+                def release():
+                    self.stop()
+                    if self.on_shutdown:
+                        self.on_shutdown()
+
+                return self._success(
+                    {"releasing": True},
+                    after_send=lambda: threading.Thread(
+                        target=release, daemon=True
+                    ).start(),
+                )
+        raise APIError("invalid_transition", "Unknown migration operation")
 
     @staticmethod
     def _lease_parameters(
@@ -930,6 +1096,8 @@ class NexusHTTPServer:
         body: bytes | None,
     ) -> HTTPResponse:
         try:
+            if method == "POST" and path.startswith("/migration/"):
+                return self._migration_operation(path, self._decode_object(body))
             if method == "GET" and path == "/health":
                 parameters = parse_qs(query, keep_blank_values=True)
                 if parameters.get("sse") == ["1"]:

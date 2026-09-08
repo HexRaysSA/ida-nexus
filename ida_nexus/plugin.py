@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,9 @@ class _ReadyToRunHook(ida_kernwin.UI_Hooks):
         # scripts that did not emit auto_empty_finally.
         self.component.reconcile_autoanalysis()
 
+    def preprocess_action(self, name: str) -> int:
+        return int(name == "Quit" and self.component.migrate_before_close())
+
 
 class _NexusPluginComponent:
     def __init__(self, *, owner: str) -> None:
@@ -57,6 +61,10 @@ class _NexusPluginComponent:
         self._runtime: IDARuntime | None = None
         self._server: NexusHTTPServer | None = None
         self._external_registration = False
+        self._gui_dispatcher = None
+        self._close_filter = None
+        self._allow_close = False
+        self._closing = False
 
     def log(self, message: str) -> None:
         ida_kernwin.msg(f"[{self.owner}] {message}\n")
@@ -77,6 +85,29 @@ class _NexusPluginComponent:
             return False
 
         self.analysis_state = AnalysisState()
+        # IDA timer registration is not reentrant: construct this during plugin
+        # init, never from a timer callback that starts the HTTP service.
+        from ._gui_dispatch import create_dispatcher
+
+        self._gui_dispatcher = create_dispatcher()
+        from PySide6.QtCore import QEvent, QObject
+        from PySide6.QtWidgets import QApplication
+
+        component = self
+
+        class CloseFilter(QObject):
+            def eventFilter(self, watched, event):
+                if (
+                    event.type() == QEvent.Close
+                    and watched.inherits("QMainWindow")
+                    and component.migrate_before_close()
+                ):
+                    event.ignore()
+                    return True
+                return False
+
+        self._close_filter = CloseFilter(QApplication.instance())
+        QApplication.instance().installEventFilter(self._close_filter)
         self._analysis_hook = create_autoanalysis_hook(self.analysis_state)
         self._analysis_hook.hook()
         # The change hook is installed only while /idb_events has subscribers
@@ -137,12 +168,14 @@ class _NexusPluginComponent:
             analysis_state=analysis_state,
             idb_change_state=idb_change_state,
             unattributed_operation_label="IDA GUI",
+            gui_dispatcher=self._gui_dispatcher,
         )
         server = NexusHTTPServer(
             runtime,
             identity,
             analysis_state,
             REGISTRY_DIR,
+            on_shutdown=self._close_gui,
         )
         try:
             server.start()
@@ -159,6 +192,48 @@ class _NexusPluginComponent:
         self._server = server
         self.log("Database registered successfully!")
 
+    def _close_gui(self) -> None:
+        import ida_pro
+        from PySide6.QtCore import QTimer
+
+        runtime = self._runtime
+        if runtime is None or runtime._gui_dispatcher is None:
+            raise RuntimeError("GUI dispatcher is unavailable")
+        # qexit destroys IDA timers. Invoke outside the timer dispatcher to
+        # avoid deadlocking IDA's timer registry during native teardown.
+        self._allow_close = True
+        runtime._gui_dispatcher.call(
+            lambda: QTimer.singleShot(0, lambda: ida_pro.qexit(0)), timeout=30
+        )
+
+    def migrate_before_close(self) -> bool:
+        """Keep connected clients alive when the user closes the native window."""
+        server = self._server
+        if self._allow_close or server is None or not server.client_count:
+            return False
+        if self._closing:
+            return True
+        self._closing = True
+        source = server.entry
+
+        def handoff():
+            from ._migration import begin, wait
+
+            try:
+                begin(source, "idalib", None, 300)
+                wait(source)
+            except Exception as exc:  # noqa: BLE001 -- retain GUI on failed close
+                self._closing = False
+                if self._gui_dispatcher is not None:
+                    self._gui_dispatcher.call(
+                        self.log, f"Could not move database to headless mode: {exc}"
+                    )
+
+        threading.Thread(
+            target=handoff, name="ida-nexus-gui-close", daemon=True
+        ).start()
+        return True
+
     def run(self, *, caller: str) -> None:
         attribution = f" (initialized by {self.owner})" if caller != self.owner else ""
         if self._server is not None:
@@ -172,6 +247,14 @@ class _NexusPluginComponent:
         ida_kernwin.msg(f"[{caller}] {message}\n")
 
     def term(self) -> None:
+        if self._close_filter is not None:
+            from PySide6.QtWidgets import QApplication
+
+            QApplication.instance().removeEventFilter(self._close_filter)
+            self._close_filter = None
+        if self._gui_dispatcher is not None:
+            self._gui_dispatcher.close()
+            self._gui_dispatcher = None
         if self._ui_hook is not None:
             self._ui_hook.unhook()
             self._ui_hook = None
