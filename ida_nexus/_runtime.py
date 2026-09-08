@@ -458,6 +458,8 @@ class IDARuntime:
         idb_change_state: IdbChangeState,
         default_timeout: float = DEFAULT_TIMEOUT_SECONDS,
         unattributed_operation_label: str | None = None,
+        gui_dispatcher: Any = None,
+        auto_analysis_policy: bool | None = None,
     ) -> None:
         # Library warnings would otherwise be captured as stderr and returned
         # to the agent alongside execution output.
@@ -478,6 +480,7 @@ class IDARuntime:
             raise ValueError("default_timeout must be a positive finite number")
 
         self.backend = backend
+        self.auto_analysis_policy = auto_analysis_policy
         self.database = database
         self.analysis_state = analysis_state
         self.idb_change_state = idb_change_state
@@ -493,6 +496,11 @@ class IDARuntime:
         self._active_interrupt_error: APIError | None = None
         self._session_namespaces: dict[str, dict[str, Any]] = {}
         self._idb_change_hook: Any = None
+        self._gui_dispatcher = gui_dispatcher
+        if backend == "gui" and gui_dispatcher is None:
+            from ._gui_dispatch import create_dispatcher
+
+            self._gui_dispatcher = create_dispatcher()
 
     def _interrupt_active(
         self,
@@ -551,6 +559,19 @@ class IDARuntime:
         capture_output: bool = False,
         trace_filename: str | None = None,
     ) -> Any:
+        dispatcher = self._gui_dispatcher
+        if dispatcher is not None and threading.get_ident() != dispatcher.thread:
+            return dispatcher.call(
+                lambda: self._run_sync(
+                    function,
+                    kind=kind,
+                    timeout=timeout,
+                    batch=batch,
+                    capture_output=capture_output,
+                    trace_filename=trace_filename,
+                ),
+                timeout=timeout or self.default_timeout,
+            )
         import ida_kernwin
         import idc
 
@@ -939,7 +960,7 @@ class IDARuntime:
                 deadline = time.monotonic() + max_seconds
                 for _ in range(max_steps):
                     if not ida_auto.auto_make_step(0, ida_idaapi.BADADDR):
-                        return True
+                        return bool(ida_auto.auto_is_ok())
                     if time.monotonic() >= deadline:
                         break
                 return False
@@ -952,7 +973,7 @@ class IDARuntime:
             kind="analysis_slice",
             timeout=None,
         )
-        if completed and ida_auto.auto_is_ok():
+        if completed:
             self.analysis_state.mark_complete()
         return self.analysis_state.snapshot()
 
@@ -987,6 +1008,85 @@ class IDARuntime:
                 status=409,
             )
         return self.analysis_state.snapshot()
+
+    def prepare_migration(self, timeout: float) -> dict[str, Any]:
+        import os
+
+        import ida_auto
+        import ida_dbg
+        import ida_ida
+        import ida_loader
+
+        def prepare():
+            if ida_dbg.get_process_state() != ida_dbg.DSTATE_NOTASK:
+                raise APIError(
+                    "debugger_active", "Stop the debugger before migrating", status=409
+                )
+            if ida_loader.is_database_flag(ida_loader.DBFL_TEMP):
+                raise APIError(
+                    "save_as_required",
+                    "Use Save As before migrating a temporary IDB",
+                    status=409,
+                )
+            path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
+            if path and (
+                (os.path.exists(path) and not os.access(path, os.W_OK))
+                or not os.access(os.path.dirname(path), os.W_OK)
+            ):
+                raise APIError(
+                    "save_failed",
+                    "Database or its directory is not writable",
+                    status=409,
+                )
+            enabled = (
+                self.auto_analysis_policy
+                if self.auto_analysis_policy is not None
+                else ida_ida.inf_is_auto_enabled()
+            )
+            self._migration_auto_enabled = ida_auto.enable_auto(False)
+            try:
+                if not path or not ida_loader.save_database(path, 0):
+                    raise APIError(
+                        "save_failed",
+                        "IDA could not save the database for migration",
+                        status=500,
+                    )
+            except BaseException:
+                ida_auto.enable_auto(enabled)
+                raise
+            gui = None
+            if self.backend == "gui":
+                from PySide6.QtCore import QCoreApplication
+
+                gui = {
+                    # Embedded IDAPython's sys.executable points at Python.
+                    "executable": QCoreApplication.applicationFilePath(),
+                    "environment": {
+                        key: value
+                        for key, value in os.environ.items()
+                        if key
+                        in {
+                            "DISPLAY",
+                            "WAYLAND_DISPLAY",
+                            "XAUTHORITY",
+                            "QT_QPA_PLATFORM",
+                        }
+                    },
+                }
+            return {"saved": True, "auto_analysis": bool(enabled), "gui": gui}
+
+        return self._run_sync(prepare, kind="migration", timeout=timeout)
+
+    def cancel_migration(self) -> None:
+        import ida_auto
+
+        self._run_sync(
+            lambda: ida_auto.enable_auto(
+                getattr(self, "_migration_auto_enabled", True)
+            ),
+            kind="migration",
+            timeout=10,
+        )
 
     def save_database(self) -> dict[str, Any]:
         import ida_kernwin

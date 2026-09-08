@@ -1,5 +1,6 @@
 import http.client
 import json
+import logging
 import math
 import socket
 import threading
@@ -45,6 +46,7 @@ class DatabaseChangeSubscription:
     """A closeable iterator over one handle's IDB change notifications."""
 
     def __init__(self, handle: "DatabaseHandle") -> None:
+        handle._recover_migration()
         self._handle = handle
         self._lock = threading.Lock()
         self._closed = threading.Event()
@@ -109,9 +111,41 @@ class DatabaseChangeSubscription:
                 "failed to subscribe to database changes: socket unavailable"
             )
         stream_socket.settimeout(None)
-        self._connection = connection
-        self._response = response
-        self._socket = stream_socket
+        with self._lock:
+            if self._closed.is_set() or self._handle._closed.is_set():
+                stream_socket.shutdown(socket.SHUT_RDWR)
+                response.close()
+                connection.close()
+                raise NexusConnectionError(
+                    "Database change subscription closed during connection"
+                )
+            self._connection = connection
+            self._response = response
+            self._socket = stream_socket
+            self._source_record = entry.record_id
+
+    def _resume_migration(self) -> dict | None:
+        if self._closed.is_set() or self._handle._closed.is_set():
+            return None
+        self._handle._recover_migration()
+        successor = self._handle.instance
+        if successor.record_id == self._source_record:
+            return None
+        with self._lock:
+            response, connection = self._response, self._connection
+            self._response = self._connection = self._socket = None
+        if response:
+            response.close()
+        if connection:
+            connection.close()
+        self._open(successor)
+        return {
+            "event_name": "runtime_reset",
+            "revision": 0,
+            "runtime_generation": self._handle.runtime_generation,
+            "operation_label": "Nexus ownership changed",
+            "timestamp": time.time_ns(),
+        }
 
     @property
     def closed(self) -> bool:
@@ -138,6 +172,8 @@ class DatabaseChangeSubscription:
             ) as exc:
                 if self._handle._closed.is_set():
                     raise StopIteration from None
+                if reset := self._resume_migration():
+                    return reset
                 if self._handle._disconnected.is_set():
                     raise DatabaseDisconnectedError(
                         self._handle.disconnect_reason
@@ -152,6 +188,8 @@ class DatabaseChangeSubscription:
             if not line:
                 if self._handle._closed.is_set():
                     raise StopIteration
+                if reset := self._resume_migration():
+                    return reset
                 if self._handle._disconnected.is_set():
                     raise DatabaseDisconnectedError(
                         self._handle.disconnect_reason
@@ -267,6 +305,7 @@ class DatabaseHandle:
         self.path = path
         self.keepalive = float(keepalive)
         self.recovery = recovery
+        self._requested_idle_timeout = idle_timeout
         # Idle expiration is useful only for managed workers. GUI and directly
         # launched unmanaged instances retain their lease until explicit close.
         self.idle_timeout = (
@@ -281,6 +320,9 @@ class DatabaseHandle:
         self._on_disconnect = on_disconnect
         self._lock = threading.Lock()
         self._request_lock = threading.Lock()
+        self._rebind_lock = threading.Lock()
+        self._lifecycle_callbacks: list[Callable[[dict], None]] = []
+        self.runtime_generation = 0
         self._closed = threading.Event()
         self._disconnected = threading.Event()
         self._disconnect_reason: str | None = None
@@ -353,6 +395,15 @@ class DatabaseHandle:
             )
 
         def resolve() -> DatabaseInstance:
+            from functools import partial
+
+            from .gui import GuiLaunchOptions, spawn_gui
+
+            spawn_options = {}
+            if options.backend == "gui":
+                spawn_options["spawner"] = partial(
+                    spawn_gui, gui=options.gui or GuiLaunchOptions()
+                )
             return resolve_instance(
                 path,
                 spawn=options.spawn,
@@ -382,6 +433,7 @@ class DatabaseHandle:
                 windows_dir=options.windows_dir,
                 no_segmentation=options.no_segmentation,
                 debug_flags=options.debug_flags,
+                **spawn_options,
             )
 
         instance = resolve()
@@ -394,14 +446,117 @@ class DatabaseHandle:
         if options.idle_timeout is not None:
             attach_options["idle_timeout"] = options.idle_timeout
         try:
-            return cls.attach(instance, **attach_options)
+            handle = cls.attach(instance, **attach_options)
         except NexusConnectionError:
             # The worker may cross its zero-lease shutdown boundary between
             # resolve and the SSE handshake. Resolve once more as promised by
             # the instance lifecycle contract.
             time.sleep(0.05)
             replacement = resolve()
-            return cls.attach(replacement, **attach_options)
+            handle = cls.attach(replacement, **attach_options)
+        if options.backend != "auto" and handle.instance.backend != options.backend:
+            try:
+                handle.ensure_backend(
+                    options.backend, gui=options.gui, timeout=options.startup_timeout
+                )
+            except BaseException:
+                handle.close()
+                raise
+        return handle
+
+    def add_lifecycle_listener(self, callback: Callable[[dict], None]) -> None:
+        """Receive runtime_reset after a planned process change; globals/undo reset."""
+        self._lifecycle_callbacks.append(callback)
+
+    def ensure_backend(self, backend: str, *, gui=None, timeout: float = 120) -> dict:
+        """Change the shared owner without teaching callers about transport moves."""
+        from ._migration import MigrationError, begin, transition_for
+
+        if backend not in {"gui", "idalib"}:
+            raise ValueError("backend must be gui or idalib")
+        self._recover_migration()
+        source = self.instance
+        if source.backend == backend:
+            return {
+                "backend": backend,
+                "changed": False,
+                "runtime_generation": self.runtime_generation,
+            }
+        record = begin(source, backend, gui, timeout)
+        self._recover_migration()
+        if self.instance.backend != backend:
+            outcome = transition_for(source)
+            detail = (outcome or {}).get(
+                "error"
+            ) or "The requested backend could not start"
+            if (outcome or {}).get("state") == "rolled_back":
+                detail += "; the database was restored to its previous backend"
+            raise MigrationError(detail)
+        return {
+            "backend": backend,
+            "changed": True,
+            "transition": record["id"],
+            "runtime_generation": self.runtime_generation,
+        }
+
+    def _recover_migration(self) -> bool:
+        from ._migration import transition_for, wait
+
+        source = self.instance
+        record = transition_for(source)
+        if record is None or record["state"] == "failed":
+            return False
+        with self._rebind_lock:
+            if self.instance.record_id != source.record_id:
+                return True
+            result = wait(source, closed=self._closed)
+            if result is None:
+                return False
+            successor, transition = result
+            # Serialize rebinding with requests; never interrupt an admitted POST.
+            with self._request_lock:
+                if self._closed.is_set():
+                    return False
+                connection, response, sock = self._open_lease(successor)
+                with self._lock:
+                    if self._closed.is_set():
+                        sock.shutdown(socket.SHUT_RDWR)
+                        response.close()
+                        connection.close()
+                        return False
+                    old_rpc = self._rpc_connection
+                    old_lease = self._lease_connection
+                    self._instance = successor
+                    self._rpc_connection = None
+                    self._rpc_last_used = None
+                    self._lease_connection, self._lease_response, self._lease_socket = (
+                        connection,
+                        response,
+                        sock,
+                    )
+                    self.runtime_generation += 1
+                if old_rpc:
+                    old_rpc.close()
+                if old_lease:
+                    old_lease.close()
+            self._lease_thread = threading.Thread(
+                target=self._monitor_lease,
+                name=f"ida-nexus-lease-{successor.pid}",
+                daemon=True,
+            )
+            self._lease_thread.start()
+        event = {
+            "type": "runtime_reset",
+            "transition": transition["id"],
+            "backend": successor.backend,
+            "runtime_generation": self.runtime_generation,
+        }
+        for callback in tuple(self._lifecycle_callbacks):
+            try:
+                callback(event)
+            except Exception:
+                logging.getLogger(__name__).exception("Nexus lifecycle callback failed")
+        return True
 
     @property
     def instance(self) -> DatabaseInstance:
@@ -459,8 +614,13 @@ class DatabaseHandle:
             lease_path = (
                 f"/health?sse=1&lease_id={self._lease_id}&keepalive={self.keepalive:g}"
             )
-            if self.idle_timeout is not None:
-                lease_path += f"&idle_timeout={self.idle_timeout:g}"
+            idle_timeout = (
+                self._requested_idle_timeout
+                if entry.backend == "idalib" and entry.managed
+                else None
+            )
+            if idle_timeout is not None:
+                lease_path += f"&idle_timeout={idle_timeout:g}"
             connection.request(
                 "GET",
                 lease_path,
@@ -506,6 +666,7 @@ class DatabaseHandle:
     def _monitor_lease(self) -> None:
         with self._lock:
             response = self._lease_response
+            source = self._instance
         reason = "database connection closed"
         event_name: bytes | None = None
         event_data: list[bytes] = []
@@ -540,6 +701,13 @@ class DatabaseHandle:
             reason = f"database connection failed: {exc}"
         if self._closed.is_set():
             return
+        if self.instance.record_id != source.record_id:
+            return
+        try:
+            if self._recover_migration():
+                return
+        except NexusConnectionError as exc:
+            reason = str(exc)
         crash_state = self._crashed_database_state(self.instance)
         if crash_state is not None:
             reason = (
@@ -630,6 +798,7 @@ class DatabaseHandle:
         unwrap_result: bool = True,
         operation_id: str | None = None,
     ) -> Any:
+        self._recover_migration()
         request_payload = {**payload, "lease_id": self._lease_id}
         if operation_id is not None:
             request_payload["operation_id"] = operation_id
@@ -698,6 +867,17 @@ class DatabaseHandle:
         if status != 200 or (unwrap_result and not response_payload.get("ok")):
             error = response_payload.get("error")
             if isinstance(error, dict):
+                if error.get("code") == "migrating" and self._recover_migration():
+                    # Explicit pre-admission rejection is safe to retry. Never
+                    # use this path for transport failures or accepted mutations.
+                    return self._request(
+                        endpoint,
+                        payload,
+                        method=method,
+                        timeout=timeout,
+                        unwrap_result=unwrap_result,
+                        operation_id=operation_id,
+                    )
                 details = {
                     str(key): value
                     for key, value in error.items()

@@ -136,6 +136,15 @@ def _resolve_existing(
             f"executable {source}",
         )
         if gui is not None:
+            from ._migration import transition_for, wait
+
+            transition = transition_for(gui.instance)
+            if (
+                transition
+                and transition["state"] != "failed"
+                and (result := wait(gui.instance))
+            ):
+                return result[0]
             if gui.state is InstanceState.READY:
                 return gui.instance
             raise DatabaseBusyError(
@@ -150,6 +159,13 @@ def _resolve_existing(
     )
     if owner is None:
         return None
+    from ._migration import transition_for, wait
+
+    transition = transition_for(owner.instance)
+    if transition and transition["state"] != "failed":
+        result = wait(owner.instance)
+        if result is not None:
+            return result[0]
     if owner.state is InstanceState.READY:
         return owner.instance
     raise DatabaseBusyError(
@@ -272,6 +288,8 @@ def spawn_worker(
     expected_idb: str,
     lease_grace: float,
     options: WorkerLaunchOptions | None = None,
+    *,
+    environment: dict[str, str] | None = None,
 ) -> tuple[subprocess.Popen[bytes], Path]:
     suffix = os.urandom(3).hex()
     try:
@@ -288,6 +306,7 @@ def spawn_worker(
     )
 
     process: subprocess.Popen[bytes]
+    environment_options = {"env": {**os.environ, **environment}} if environment else {}
     if os.name == "nt":
         process = subprocess.Popen(
             command,
@@ -295,6 +314,7 @@ def spawn_worker(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=False,
+            **environment_options,
             creationflags=(
                 subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
             ),
@@ -306,6 +326,7 @@ def spawn_worker(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=False,
+            **environment_options,
             start_new_session=True,
         )
     log_path = ensure_private_directory(LOG_DIR) / f"{process.pid}-{suffix}.log"

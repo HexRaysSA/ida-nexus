@@ -21,12 +21,14 @@ from .errors import (
     DatabaseDisconnectedError,
     DatabaseOpenError,
     DatabaseSelectionError,
+    MigrationError,
     NexusConnectionError,
     NexusError,
     NoDatabaseInstanceError,
     RemoteError,
     WorkerStartError,
 )
+from .gui import GuiLaunchOptions
 from .handle import DatabaseChangeSubscription, DatabaseHandle
 from .instances import (
     DatabaseInstance,
@@ -78,8 +80,10 @@ __all__ = [
     "DatabaseRecovery",
     "DatabaseSelectionError",
     "DiscoveredDatabase",
+    "GuiLaunchOptions",
     "InstanceState",
     "ListDatabasesResult",
+    "MigrationError",
     "NexusConnectionError",
     "NexusError",
     "NoDatabaseInstanceError",
