@@ -104,6 +104,32 @@ class TranscriptTests(unittest.TestCase):
         self.assertTrue(totals["has_tokens"])
         self.assertFalse(totals["cost_available"])
 
+    def test_known_copilot_internal_events_are_not_unsupported(self) -> None:
+        internal_types = {
+            "model.captured_assignment_context",
+            "model.message",
+            "model.messages_snapshot",
+            "model.model_call_started",
+            "model.model_call_success",
+            "model.response",
+            "model.turn_ended",
+            "model.turn_started",
+            "permission.completed",
+            "permission.requested",
+        }
+        records = [
+            {
+                "type": record_type,
+                "timestamp": "2026-01-01T00:00:02Z",
+                "data": {},
+            }
+            for record_type in internal_types
+        ]
+
+        items, _meta = dashboard._copilot_items(records)
+
+        self.assertEqual(items, [])
+
     def test_unknown_copilot_event_remains_visible(self) -> None:
         timestamp = "2026-01-01T00:00:02Z"
         items, _meta = dashboard._copilot_items(
