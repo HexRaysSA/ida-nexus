@@ -9,19 +9,16 @@ import math
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from ida_nexus._registry import (
     LOG_DIR,
     DatabaseInstance,
     canonical_path,
-    idb_key,
-    scan_instances,
 )
-from ida_nexus._resolver import expected_idb_path
 from ida_nexus.database_state import probe_database_state
 from ida_nexus.errors import (
     DatabaseCrashedError,
@@ -30,7 +27,11 @@ from ida_nexus.errors import (
     NexusError,
 )
 from ida_nexus.handle import DATABASE_CLOSE_TIMEOUT_SECONDS, DatabaseHandle
-from ida_nexus.models import PythonExecutionResult
+from ida_nexus.instances import list_databases as list_instances
+from ida_nexus.models import (
+    ListDatabasesResult,
+    PythonExecutionResult,
+)
 from ida_nexus.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
 
 DEFAULT_OPEN_TIMEOUT_SECONDS = 300.0
@@ -59,24 +60,6 @@ def _entry_target_fields(entry: DatabaseInstance) -> dict[str, Any]:
     }
 
 
-DatabaseStatus = Literal["available", "attached", "current", "unavailable"]
-
-
-class DatabaseListing(TypedDict):
-    path: str
-    backend: Annotated[str, "Instance backend: gui or idalib."]
-    status: Annotated[
-        str,
-        "Action state: available, attached, current, or unavailable.",
-    ]
-    instance_id: str | None
-    error: str | None
-
-
-class ListDatabasesResult(TypedDict):
-    instances: list[DatabaseListing]
-
-
 class OpenDatabaseResult(TypedDict):
     instance_id: str
     backend: Annotated[str, "Instance backend: gui or idalib."]
@@ -100,13 +83,6 @@ class CloseDatabaseResult(TypedDict):
     closed: bool
 
 
-@dataclass(frozen=True)
-class _AttachedDatabase:
-    entry: DatabaseInstance
-    instance_id: str
-    current: bool
-
-
 @dataclass
 class _DatabaseSession:
     instance_id: str
@@ -124,6 +100,8 @@ class DatabaseManager:
         execute_timeout: float = DEFAULT_EXECUTE_TIMEOUT_SECONDS,
         keepalive: float = 0.0,
         idle_timeout: float | None = None,
+        worker_env: Mapping[str, str] | None = None,
+        worker_cwd: str | Path | None = None,
     ) -> None:
         if not math.isfinite(open_timeout) or open_timeout <= 0:
             raise ValueError("open_timeout must be a positive finite number")
@@ -148,6 +126,11 @@ class DatabaseManager:
         self._open_timeout = open_timeout
         self._execute_timeout = execute_timeout
         self._keepalive = float(keepalive)
+        # Validated here rather than at the first open, so a caller that pinned
+        # an unusable environment hears about it where it said so.
+        DatabaseOpenOptions(worker_env=worker_env, worker_cwd=worker_cwd)
+        self._worker_env = worker_env
+        self._worker_cwd = worker_cwd
         self._idle_timeout = float(idle_timeout) if idle_timeout is not None else None
         self._instances: dict[str, _DatabaseSession] = {}
         self._disconnected_instances: dict[str, str] = {}
@@ -246,6 +229,8 @@ class DatabaseManager:
                         startup_timeout=self._open_timeout,
                         keepalive=self._keepalive,
                         idle_timeout=self._idle_timeout,
+                        worker_env=self._worker_env,
+                        worker_cwd=self._worker_cwd,
                         # Publish the worker first, then start analysis through
                         # its normal Nexus operation and hook lifecycle.
                         auto_analysis=True,
@@ -518,78 +503,12 @@ class DatabaseManager:
         )
         return SaveDatabaseResult(path=path)
 
-    @staticmethod
-    def _listing_path(entry: DatabaseInstance) -> str:
-        """Return a path that open_database() can use to reach this instance."""
-        if (
-            entry.exe_path
-            and Path(entry.exe_path).exists()
-            and (
-                entry.backend == "gui"
-                or idb_key(expected_idb_path(entry.exe_path)) == entry.idb_key
-            )
-        ):
-            return entry.exe_path
-        return entry.idb_path
-
     def list_databases(self) -> ListDatabasesResult:
         with self._lock:
             sessions = list(self._instances.values())
             current = self._current_instance_id
-
-        attached: dict[str, _AttachedDatabase] = {}
-        for session in sessions:
-            entry = session.handle.instance
-            attached[entry.record_id] = _AttachedDatabase(
-                entry=entry,
-                instance_id=session.instance_id,
-                current=session.instance_id == current,
-            )
-
-        instances: list[DatabaseListing] = []
-        for discovered in scan_instances():
-            entry = discovered.instance
-            local = attached.pop(entry.record_id, None)
-            if discovered.state.value != "ready":
-                status: DatabaseStatus = "unavailable"
-            elif local is None:
-                status = "available"
-            elif local.current:
-                status = "current"
-            else:
-                status = "attached"
-            instances.append(
-                DatabaseListing(
-                    path=self._listing_path(entry),
-                    backend=entry.backend,
-                    status=status,
-                    instance_id=local.instance_id if local else None,
-                    error=discovered.detail if status == "unavailable" else None,
-                )
-            )
-
-        # A local lease remains actionable during a transient registry scan,
-        # so do not hide it merely because discovery missed its record.
-        for local in attached.values():
-            instances.append(
-                DatabaseListing(
-                    path=self._listing_path(local.entry),
-                    backend=local.entry.backend,
-                    status="current" if local.current else "attached",
-                    instance_id=local.instance_id,
-                    error=None,
-                )
-            )
-
-        status_order = {"current": 0, "attached": 1, "available": 2, "unavailable": 3}
-        instances.sort(
-            key=lambda item: (
-                status_order[item["status"]],
-                item["backend"] != "gui",
-                item["path"],
-            )
-        )
-        return {"instances": instances}
+        held = {session.instance_id: session.handle.instance for session in sessions}
+        return list_instances(held, current=current)
 
     def close_database(self, instance_id: str | None) -> CloseDatabaseResult:
         target_id, session = self._get_session(instance_id)

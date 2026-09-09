@@ -1259,7 +1259,9 @@ def test_list_databases_does_not_wait_for_an_active_operation(
     execution = threading.Thread(target=execute_python, daemon=True)
     execution.start()
     assert backend.started.wait(1)
-    monkeypatch.setattr("ida_nexus.manager.scan_instances", list)
+    # The scan now happens in the public listing the manager delegates to,
+    # which is the point: the manager no longer has its own copy of it.
+    monkeypatch.setattr("ida_nexus.instances.discover_databases", lambda *_a, **_k: [])
 
     listing_finished = threading.Event()
     errors: list[Exception] = []
@@ -2733,3 +2735,96 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
     assert failures
     server.stop()
     server.release_registration()
+
+
+def test_the_manager_pins_its_workers_like_a_handle_does(monkeypatch) -> None:
+    """Parity: whatever opens a database can say what the worker inherits.
+
+    Without it a host that runs untrusted code through this manager has no way
+    to stop the worker inheriting its own environment, which a handle has had
+    since worker_env landed.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_open(path, *, options=None, on_disconnect=None):
+        captured["options"] = options
+        raise NexusConnectionError("stop before starting IDA")
+
+    monkeypatch.setattr(client_mod.DatabaseHandle, "open", fake_open)
+    manager = DatabaseManager(worker_env={"PATH": "/bin"}, worker_cwd="/srv/work")
+    with pytest.raises(NexusConnectionError):
+        manager.open_database("firmware.bin", set_current=True)
+
+    assert captured["options"].worker_env == {"PATH": "/bin"}
+    assert captured["options"].worker_cwd == "/srv/work"
+
+
+def test_an_unusable_pin_is_refused_where_it_was_written() -> None:
+    with pytest.raises(ValueError, match="not usable"):
+        DatabaseManager(worker_env={"A=B": "1"})
+
+
+def test_listing_databases_is_one_implementation(monkeypatch) -> None:
+    """The manager and a bare-handle caller answer from the same code.
+
+    A host holding its own leases used to have to rebuild the status logic to
+    get this list, which is exactly the kind of copy that drifts.
+    """
+    from ida_nexus import list_databases
+    from ida_nexus._registry import DiscoveredDatabase, InstanceState
+
+    entry = SimpleNamespace(
+        record_id="rec-1",
+        backend="idalib",
+        idb_path="/w/target.i64",
+        exe_path="",
+        idb_key="k",
+    )
+    other = SimpleNamespace(
+        record_id="rec-2",
+        backend="gui",
+        idb_path="/w/other.i64",
+        exe_path="",
+        idb_key="k2",
+    )
+    monkeypatch.setattr(
+        "ida_nexus.instances.discover_databases",
+        lambda _timeout=1.0: [
+            DiscoveredDatabase(entry, InstanceState.READY),
+            DiscoveredDatabase(other, InstanceState.READY),
+        ],
+    )
+
+    listed = list_databases({"mine": entry}, current="mine")["instances"]
+    by_path = {item["path"]: item for item in listed}
+    assert by_path["/w/target.i64"]["status"] == "current"
+    assert by_path["/w/target.i64"]["instance_id"] == "mine"
+    # Someone else's, so it is offered rather than claimed.
+    assert by_path["/w/other.i64"]["status"] == "available"
+    assert by_path["/w/other.i64"]["instance_id"] is None
+
+
+def test_a_lease_the_scan_missed_is_still_listed(monkeypatch) -> None:
+    """It remains usable, so hiding it during a transient scan would be wrong."""
+    from ida_nexus import list_databases
+
+    entry = SimpleNamespace(
+        record_id="rec-1",
+        backend="idalib",
+        idb_path="/w/target.i64",
+        exe_path="",
+        idb_key="k",
+    )
+    monkeypatch.setattr(
+        "ida_nexus.instances.discover_databases", lambda _timeout=1.0: []
+    )
+    listed = list_databases({"mine": entry})["instances"]
+    assert listed == [
+        {
+            "path": "/w/target.i64",
+            "backend": "idalib",
+            "status": "attached",
+            "instance_id": "mine",
+            "error": None,
+        }
+    ]

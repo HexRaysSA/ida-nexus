@@ -1,6 +1,6 @@
 """Public result models returned by Nexus database operations."""
 
-from typing import Any, TypeAlias, TypedDict
+from typing import Annotated, Any, Literal, TypeAlias, TypedDict
 
 
 class PythonExecutionResult(TypedDict):
@@ -26,3 +26,21 @@ class SaveResult(TypedDict):
 class ShutdownResult(TypedDict):
     shutting_down: bool
     save: bool
+
+
+DatabaseStatus = Literal["available", "attached", "current", "unavailable"]
+
+
+class DatabaseListing(TypedDict):
+    path: str
+    backend: Annotated[str, "Instance backend: gui or idalib."]
+    status: Annotated[
+        str,
+        "Action state: available, attached, current, or unavailable.",
+    ]
+    instance_id: str | None
+    error: str | None
+
+
+class ListDatabasesResult(TypedDict):
+    instances: list[DatabaseListing]
