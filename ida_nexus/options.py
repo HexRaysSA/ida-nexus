@@ -1,9 +1,10 @@
 """Public options for opening or spawning an IDA Nexus database."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 MAX_KEEPALIVE_SECONDS = 3600.0
 
@@ -25,6 +26,14 @@ class DatabaseOpenOptions:
     lease after inactivity; it is ignored for GUI and unmanaged instances.
     ``keepalive`` instead delays worker shutdown after the lease is released.
     ``image_base`` is a byte address and must be 16-byte aligned.
+
+    ``worker_env`` and ``worker_cwd`` configure the spawned process rather than
+    the database it opens: without them the worker inherits the environment and
+    working directory of whoever asked for the open. A caller that runs
+    untrusted code through ``execute_python`` needs that inheritance to stop,
+    because the worker's environment is readable from inside IDA. Pass a
+    complete environment rather than an overlay; an empty mapping is honoured
+    and gives the worker nothing.
     """
 
     spawn: bool = True
@@ -32,6 +41,8 @@ class DatabaseOpenOptions:
     output_database: str | Path | None = None
     keepalive: float = 0.0
     idle_timeout: float | None = None
+    worker_env: Mapping[str, str] | None = None
+    worker_cwd: str | Path | None = None
     auto_analysis: bool = True
     image_base: int | None = None
     new_database: bool = False
@@ -75,6 +86,18 @@ class DatabaseOpenOptions:
             or self.idle_timeout <= 0
         ):
             raise ValueError("idle_timeout must be a positive finite number or None")
+        if self.worker_env is not None:
+            for name, value in self.worker_env.items():
+                if not isinstance(name, str) or not isinstance(value, str):
+                    raise TypeError("worker_env names and values must be strings")
+                # Rejected here rather than by the spawn, which reports a
+                # ValueError from deep inside subprocess with no field name.
+                if not name or "=" in name or "\0" in name:
+                    raise ValueError(f"worker_env name is not usable: {name!r}")
+                if "\0" in value:
+                    raise ValueError(f"worker_env value for {name} contains a NUL")
+        if self.worker_cwd is not None and not str(self.worker_cwd):
+            raise ValueError("worker_cwd must not be empty")
         if self.image_base is not None:
             if isinstance(self.image_base, bool) or self.image_base < 0:
                 raise ValueError("image_base must be a non-negative byte address")
@@ -111,5 +134,9 @@ class DatabaseOpenOptions:
             _string_tuple(self.second_pass_directives),
         )
         object.__setattr__(self, "script_args", _string_tuple(self.script_args))
+        if self.worker_env is not None:
+            object.__setattr__(
+                self, "worker_env", MappingProxyType(dict(self.worker_env))
+            )
         if not isinstance(self.debug_flags, int):
             object.__setattr__(self, "debug_flags", _string_tuple(self.debug_flags))

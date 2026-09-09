@@ -218,3 +218,70 @@ def test_startup_timeout_keeps_last_health_failure_and_log(
         )
     assert "owner is draining" in str(error.value)
     assert "waiting for analysis" in str(error.value)
+
+
+def pinned_spawn(monkeypatch):
+    """Capture what `spawn_worker` would hand to the OS."""
+    captured = {}
+
+    def fake_popen(command, **kwargs):
+        captured.update(command=command, kwargs=kwargs)
+        return SimpleNamespace(pid=4321)
+
+    monkeypatch.setattr(resolver.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(resolver, "_find_console_script", lambda _name: "ida-nexus")
+    return captured
+
+
+def test_worker_environment_and_directory_reach_the_spawn(source, monkeypatch):
+    """A caller that must not leak its own environment can replace it.
+
+    The worker runs whatever `execute_python` is handed, so a host running
+    untrusted code needs its own environment to stop at the spawn rather than
+    be readable from inside IDA.
+    """
+    captured = pinned_spawn(monkeypatch)
+    resolver.spawn_worker(
+        str(source),
+        str(expected_idb_path(source)),
+        20.0,
+        resolver.WorkerLaunchOptions(
+            worker_env={"PATH": "/bin"}, worker_cwd="/srv/work"
+        ),
+    )
+    assert captured["kwargs"]["env"] == {"PATH": "/bin"}
+    assert captured["kwargs"]["cwd"] == "/srv/work"
+    # Neither is an IDA import option, so neither becomes an argument.
+    assert not [argument for argument in captured["command"] if "/bin" in argument]
+
+
+def test_an_unpinned_spawn_still_inherits_this_process(source, monkeypatch):
+    """Leaving both unset must not start handing the worker an empty environment."""
+    captured = pinned_spawn(monkeypatch)
+    resolver.spawn_worker(
+        str(source),
+        str(expected_idb_path(source)),
+        20.0,
+        resolver.WorkerLaunchOptions(),
+    )
+    assert "env" not in captured["kwargs"]
+    assert "cwd" not in captured["kwargs"]
+
+
+def test_resolve_instance_hands_the_pin_to_the_spawner(source, monkeypatch):
+    seen = {}
+
+    def capture(_source, _expected_idb, _lease_grace, options):
+        seen["options"] = options
+        raise WorkerStartError("stop before starting IDA")
+
+    monkeypatch.setattr(resolver, "_scan_until", lambda *_a, **_k: [])
+    with pytest.raises(WorkerStartError):
+        resolver.resolve_instance(
+            source,
+            worker_env={"HOME": "/tmp"},
+            worker_cwd=Path("/srv/work"),
+            spawner=capture,
+        )
+    assert dict(seen["options"].worker_env) == {"HOME": "/tmp"}
+    assert seen["options"].worker_cwd == "/srv/work"

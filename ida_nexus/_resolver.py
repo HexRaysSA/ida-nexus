@@ -2,9 +2,10 @@ import math
 import os
 import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from ._registry import (
     DEFAULT_TIMEOUT,
@@ -36,8 +37,15 @@ from .paths import _find_console_script
 
 @dataclass(frozen=True)
 class WorkerLaunchOptions:
-    """IDA import options used only when a new idalib worker is spawned."""
+    """Options used only when a new idalib worker is spawned.
 
+    Mostly IDA import options, which reach the worker as command-line
+    arguments. ``worker_env`` and ``worker_cwd`` are not: they configure the
+    process itself and are handed to the spawn instead.
+    """
+
+    worker_env: Mapping[str, str] | None = None
+    worker_cwd: str | None = None
     auto_analysis: bool = True
     image_base: int | None = None
     new_database: bool = False
@@ -278,14 +286,22 @@ def spawn_worker(
         executable = _find_console_script("ida-nexus")
     except FileNotFoundError as error:
         raise DatabaseOpenError(str(error)) from error
+    options = options or WorkerLaunchOptions()
     command = _build_worker_command(
         source,
         expected_idb,
         lease_grace,
-        options or WorkerLaunchOptions(),
+        options,
         launcher=[executable, "worker"],
         record_suffix=suffix,
     )
+    # Left out entirely when unset, so the worker keeps inheriting this
+    # process as it always has.
+    spawn_environment: dict[str, Any] = {}
+    if options.worker_env is not None:
+        spawn_environment["env"] = dict(options.worker_env)
+    if options.worker_cwd is not None:
+        spawn_environment["cwd"] = options.worker_cwd
 
     process: subprocess.Popen[bytes]
     if os.name == "nt":
@@ -298,6 +314,7 @@ def spawn_worker(
             creationflags=(
                 subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
             ),
+            **spawn_environment,
         )
     else:
         process = subprocess.Popen(
@@ -307,6 +324,7 @@ def spawn_worker(
             stderr=subprocess.DEVNULL,
             text=False,
             start_new_session=True,
+            **spawn_environment,
         )
     log_path = ensure_private_directory(LOG_DIR) / f"{process.pid}-{suffix}.log"
     return process, log_path
@@ -423,6 +441,8 @@ def resolve_instance(
     timeout: float = 120.0,
     lease_grace: float = 20.0,
     output_database: str | os.PathLike[str] | None = None,
+    worker_env: Mapping[str, str] | None = None,
+    worker_cwd: str | os.PathLike[str] | None = None,
     auto_analysis: bool = True,
     image_base: int | None = None,
     new_database: bool = False,
@@ -466,6 +486,8 @@ def resolve_instance(
         else expected_idb_path(source)
     )
     launch_options = WorkerLaunchOptions(
+        worker_env=worker_env,
+        worker_cwd=os.fspath(worker_cwd) if worker_cwd is not None else None,
         auto_analysis=auto_analysis,
         image_base=image_base,
         new_database=new_database,

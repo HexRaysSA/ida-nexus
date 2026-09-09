@@ -358,6 +358,8 @@ class DatabaseHandle:
                 spawn=options.spawn,
                 timeout=options.startup_timeout,
                 output_database=options.output_database,
+                worker_env=options.worker_env,
+                worker_cwd=options.worker_cwd,
                 auto_analysis=options.auto_analysis,
                 image_base=options.image_base,
                 new_database=options.new_database,

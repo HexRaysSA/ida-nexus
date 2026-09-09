@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 import ida_nexus._resolver as resolver_mod
 import ida_nexus.handle as client_mod
 from ida_nexus import (
@@ -310,6 +312,25 @@ def test_worker_autoanalysis_starts_by_default() -> None:
     )
 
 
+def test_a_pinned_worker_environment_is_checked_and_snapshotted() -> None:
+    """An empty mapping is a real answer, so it must not read as unset."""
+    assert DatabaseOpenOptions().worker_env is None
+    assert DatabaseOpenOptions(worker_env={}).worker_env == {}
+
+    # Frozen options must not keep a mapping the caller can still edit.
+    handed = {"PATH": "/bin"}
+    options = DatabaseOpenOptions(worker_env=handed)
+    handed["PATH"] = "/sbin"
+    assert options.worker_env == {"PATH": "/bin"}
+
+    with pytest.raises(TypeError, match="must be strings"):
+        DatabaseOpenOptions(worker_env={"PATH": 1})
+    with pytest.raises(ValueError, match="not usable"):
+        DatabaseOpenOptions(worker_env={"A=B": "1"})
+    with pytest.raises(ValueError, match="must not be empty"):
+        DatabaseOpenOptions(worker_cwd="")
+
+
 def test_database_handle_forwards_import_options(monkeypatch) -> None:
     captured = {}
     entry = SimpleNamespace(record_id="test-entry")
@@ -343,6 +364,8 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
         options=DatabaseOpenOptions(
             output_database="firmware.i64",
             idle_timeout=30,
+            worker_env={"PATH": "/bin"},
+            worker_cwd="/srv/work",
             auto_analysis=True,
             image_base=0x8000,
             new_database=True,
@@ -377,6 +400,8 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
         "spawn": True,
         "timeout": 120.0,
         "output_database": "firmware.i64",
+        "worker_env": {"PATH": "/bin"},
+        "worker_cwd": "/srv/work",
         "auto_analysis": True,
         "image_base": 0x8000,
         "new_database": True,
