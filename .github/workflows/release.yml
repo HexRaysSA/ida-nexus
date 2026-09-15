@@ -126,12 +126,15 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           RELEASE_TYPE: ${{ github.event.inputs.release_type }}
 
+      - name: Attest distributions
+        uses: astral-sh/attest-action@f589a42a7efb6fe400b4f400de60b4bc90390027 # v0.0.6
+
       - name: Publish to PyPI
         run: uv publish
 
       - name: Create GitHub release
         run: |
-          args=("$TAG" dist/* release-assets/* --verify-tag --generate-notes --title "$TAG")
+          args=("$TAG" dist/*.whl dist/*.tar.gz release-assets/* --verify-tag --generate-notes --title "$TAG")
           if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
           else
