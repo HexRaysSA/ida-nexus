@@ -6,7 +6,7 @@
     "categories": ["api-scripting-and-automation"],
     "keywords": ["python", "automation", "idalib", "ai"],
     "description": "Authenticated local Python execution for IDA GUI and command-line idalib sessions.",
-    "idaVersions": ["9.4", "10.0"],
+    "idaVersions": ["9.4", "9.5"],
     "version": "0.11.2",
     "license": "MIT",
     "authors": [
