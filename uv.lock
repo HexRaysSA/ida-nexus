@@ -128,22 +128,13 @@ wheels = [
 [[package]]
 name = "coverage-flashlight"
 version = "1.0.0"
-source = { editable = "../coverage-flashlight" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "coverage" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "coverage", specifier = ">=7.10.6" },
-    { name = "pytest", marker = "extra == 'pytest'", specifier = ">=8" },
-]
-provides-extras = ["pytest"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8" },
-    { name = "ruff", specifier = ">=0.12.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/d4/70/db9dcd24f8ccbb57a08c18d465bcad98c606a54a01c7d0c91711f935abcf/coverage_flashlight-1.0.0.tar.gz", hash = "sha256:b953e6c524dcc0a964c01fcddbe07655b645265297ad27417a89bed3059039b4", size = 43857, upload-time = "2026-09-06T15:08:51.79Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/33/3a183224f32ccb065903fe2a604763b2f9fa71df49b1257ec61d2ce4b434/coverage_flashlight-1.0.0-py3-none-any.whl", hash = "sha256:ac188b5b39651f73a98097241bc0b3a081219f9a7b6d2352bbc4ae48d00e8e28", size = 28735, upload-time = "2026-09-06T15:08:50.861Z" },
 ]
 
 [[package]]
@@ -186,7 +177,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "coverage-flashlight", editable = "../coverage-flashlight" },
+    { name = "coverage-flashlight" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "ruff", specifier = ">=0.12.0" },
 ]

@@ -68,6 +68,3 @@ show_contexts = true
 [tool.pyright]
 # IDAPython modules provide type information but are importable only inside IDA.
 reportMissingModuleSource = "none"
-
-[tool.uv.sources]
-coverage-flashlight = { path = "../coverage-flashlight", editable = true }
