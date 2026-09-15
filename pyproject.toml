@@ -12,6 +12,10 @@ dependencies = [
     "packaging",
 ]
 
+[project.urls]
+Repository = "https://github.com/HexRaysSA/ida-nexus"
+Issues = "https://github.com/HexRaysSA/ida-nexus/issues"
+
 [project.scripts]
 ida-nexus = "ida_nexus.cli:main"
 
