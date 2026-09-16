@@ -89,8 +89,9 @@ thread scheduling can change which incidental cleanup branches execute.
 
 The lifecycle subset is `manager.py`, `handle.py`, `instances.py`,
 `database_state.py`, `_resolver.py`, `_registry.py`, `_server.py`, `_runtime.py`,
-and `cli/worker.py`. The package total includes the dashboard, reference search,
-GUI plugin, and other CLI commands. Existing coverage exclusions are respected;
+and `cli/worker.py`. The package total includes the reference search, GUI
+plugin, and other CLI commands; the historical measurement predates extraction
+of the MCP dashboard and tracing code into the `ida-mcp` repository. Existing coverage exclusions are respected;
 no extra exclusions or percentage gates were introduced for this measurement.
 
 The coverage-driven scenarios below now exercise same-path manager reuse,
