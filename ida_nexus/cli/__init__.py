@@ -7,9 +7,6 @@ import sys
 from collections.abc import Callable, Sequence
 
 _COMMAND_HELP = {
-    "mcp": "run the MCP server",
-    "dashboard": "inspect MCP session logs",
-    "logs": "export MCP session logs to ZIP",
     "reference": "query the ida-domain API reference",
     "python": "execute Python against an IDA database",
 }
@@ -46,25 +43,13 @@ def _parser() -> argparse.ArgumentParser:
 
 def _command(name: str) -> Callable[[list[str] | None], int]:
     # Imports are intentionally lazy so lightweight commands do not initialize
-    # the MCP server, dashboard, or idalib-facing modules unnecessarily.
-    if name == "mcp":
-        from .mcp import cli
-
-        return cli
+    # idalib-facing modules unnecessarily.
     if name == "reference":
         from ida_nexus.reference import cli
 
         return cli
-    if name == "dashboard":
-        from .dashboard import cli
-
-        return cli
     if name in {"python", "exec"}:
         from .python import main
-
-        return main
-    if name == "logs":
-        from .logs import main
 
         return main
     if name == "benchmark":

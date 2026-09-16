@@ -4,33 +4,12 @@
 
 If you run into problems with the installation, feel free to open an issue!
 
-## MCP tools
-
-- `reference(query)` - search the installed ida-domain API reference.
-- `open_database(path, set_current=True)` - attach to a GUI database or shared idalib worker.
-- `execute_python(code, instance_id=None, timeout=360)` - wait without a deadline for initial autoanalysis on the first execution for an attached database, then run Python with the requested execution timeout and return its result, stdout, and stderr.
-- `list_databases()` - discover all registered GUI and idalib instances and identify this MCP server's active handles.
-- `save_database(instance_id=None)` - explicitly save a database.
-- `close_database(instance_id=None)` - release this MCP server's handle and lease.
-
-The intended flow is `open_database` → `reference` → `execute_python`.
-Inside `execute_python`, `db` is the current `ida-domain` `Database`; both
-`db` and `ida_domain` are available globally. Ordinary Python statements are
-accepted, a single or trailing expression becomes the result, and
-`def run(db): ...` remains
-available for function-style code.
-
-`close_database` is not a global shutdown operation. Other agents continue to
-use the same instance. A managed idalib worker cancels orphaned execution, saves,
-and exits after its final lease disappears; GUI databases are never closed by
-MCP lifecycle management. Low-level `DatabaseManager` users can set
-`keepalive=30` (or another bounded duration) to retain an idle worker for reuse.
-
 ## Development checkout
 
 ```bash
 uv sync
-uv run ida-nexus mcp
+uv run pytest
+uv run ida-nexus --help
 ```
 
 ## Releases
@@ -51,31 +30,6 @@ python scripts/bump_version.py release-minor
 An exact version is also accepted. The `--check` command verifies that every
 managed file has the same version. Each GitHub release also includes one
 `ida-nexus-plugin-<version>.zip` asset for direct installation with HCLI.
-
-The MCP server uses stdio by default. A local HTTP transport is also available:
-
-```bash
-uv run ida-nexus mcp --transport http://127.0.0.1:5001 --agent inspector
-```
-
-To manually play with the MCP, use the inspector:
-
-```bash
-npx -y @modelcontextprotocol/inspector
-```
-
-## Develop the Claude plugin locally
-
-The plugin registers the MCP server as `ida`, so Claude Code tool names are shorter, e.g. `mcp__plugin_ida__open_database`. The first invocation of any matching `mcp__(.*[_:])?ida__.*` tool will trigger `uv` to install the server (cached after that) and fire the `PreToolUse` hook that injects the Claude session id for log correlation.
-
-Clone the repo and launch Claude Code pointing at the checkout:
-
-```bash
-git clone https://github.com/HexRaysSA/ida-nexus
-claude --plugin-dir ./ida-nexus
-```
-
-After editing `plugin.json`, hooks, or the Python source, run `/reload-plugins` inside Claude Code to pick up the changes without restarting. The manifest runs the MCP via `uv run --project ${CLAUDE_PLUGIN_ROOT} ...`, so local Python edits are reflected immediately - no rebuild step.
 
 ## Opening databases
 
@@ -119,14 +73,11 @@ def run(db):
     }
 ```
 
-Use `reference` before execution instead of guessing ida-domain API shapes. The
-MCP execution first issues a separate, unbounded initial-autoanalysis wait for
-each attached database. The upstream `/execute_python` route and client method
-do not wait implicitly, so the script retains its full execution timeout. The
-MCP tool defaults that execution-only timeout to 360 seconds and exposes it as
-a numeric argument. MCP cancellation is handled concurrently: the tool sends a
-lease- and operation-scoped `/cancel_operation` control request, waits for IDA
-to unwind, and preserves the attached database handle.
+Use `reference` before execution instead of guessing ida-domain API shapes.
+The `/execute_python` route and client method do not wait for autoanalysis
+implicitly; adapters choose when to call `wait_autoanalysis()`. Cancellation is
+lease- and operation-scoped, waits for IDA to unwind, and preserves the attached
+database handle.
 
 Latency-sensitive clients should aggregate work into one snippet rather than
 making one request per row or symbol. Each request requires one IDA main-thread
@@ -162,8 +113,8 @@ kept separate from steady-state request metrics.
 
 ## Shared clients and lifecycle
 
-Each open MCP handle maintains an authenticated SSE lease. Multiple agents and
-MCP servers may open the same database and resolve to the same GUI or idalib
+Each open `DatabaseHandle` maintains an authenticated SSE lease. Multiple
+adapters may open the same database and resolve to the same GUI or idalib
 instance.
 
 Closing a handle releases only that lease. After the final lease, managed
@@ -196,126 +147,12 @@ unset, IDA's platform default is used (`~/.idapro` on Unix-like systems or
 - `instances/` is the live discovery registry.
 - `spawn/` serializes idalib worker creation.
 - `logs/` contains IDA/worker operational output.
-- `sessions/` contains semantic MCP and agent traces, including the configured
-  agent name and MCP initialize client information/metadata.
+- `sessions/` is reserved for adapter-owned semantic sessions; IDA MCP stores
+  its traces there so existing Nexus state directories remain discoverable.
 
 Registry tokens and records are private to the local user. HTTP endpoints bind
 to `127.0.0.1`, require bearer authentication, validate `Host`, reject browser
 origins, and enforce bounded request decoding.
-
-## Semantic session traces
-
-Every MCP process writes one schema-1 JSONL trace:
-
-```text
-<IDAUSR>/nexus/sessions/<mcp-server-id>.jsonl
-```
-
-The trace contains:
-
-- every MCP tool call, result, error, and duration;
-- complete `reference` queries and results;
-- executed Python and returned values;
-- database open, reuse, disconnection, save, and release events;
-- GUI or idalib record identity and worker log path;
-- Claude, Codex, Pi, and `IDA_NEXUS_ID` session metadata.
-
-Tool calls and results are paired by `call_id`; the dashboard shows the same
-short call ID on both cards and exposes the full value in the badge tooltip and
-`data-call-id` attribute. Shared worker operational logs are linked through
-`record_id`.
-
-Claude and Codex use the bundled `PreToolUse` hook to inject transcript paths as
-hidden `_meta` values. The MCP server removes `_meta` from public arguments and
-records it under the semantic session context. Pi session metadata is handled
-the same way.
-
-## Dashboard
-
-Run the stdlib-only local dashboard with:
-
-```bash
-uv run ida-nexus dashboard --open
-uv run ida-nexus dashboard --port 9000 \
-  --sessions-dir "$IDAUSR/nexus/sessions"
-```
-
-The dashboard provides:
-
-- a newest-first session index (startup/shutdown and internal lifecycle-only
-  traces without MCP tool or linked-agent activity are hidden);
-- running, closed, or killed status;
-- all GUI and idalib targets used in one session;
-- chronological tool-call and completion events with shared call-ID badges;
-  database lifecycle events emitted inside a call carry the same badge;
-- highlighted Python code and compact single-value `reference` queries;
-- MCP `PythonExecutionResult` fields with string values rendered as unescaped
-  text and empty stdout/stderr omitted; agent-side truncation notices show when
-  the complete MCP result was not inserted into model context;
-- model-facing MCP error payloads separated from clearly marked internal
-  diagnostic metadata;
-- logged reference output and structured errors;
-- interleaved Claude, Codex, Pi, or oh-my-pi transcript activity with
-  visibility checkboxes for the transcript and unsupported events;
-- timestamped unsupported agent records as collapsed raw-JSON events rather
-  than silently dropping them;
-- token and estimated cost summaries, including separate cache-read and
-  cache-write counts, where available;
-- self-contained HTML export.
-
-Only transcript paths referenced by semantic sessions may be served.
-
-## Portable log archives
-
-Create a support ZIP containing every local semantic session, each linked
-Claude, Codex, or Pi transcript, and every file under
-`<IDAUSR>/nexus/logs/`:
-
-```bash
-uv run ida-nexus logs
-uv run ida-nexus logs --output support.zip
-```
-
-Pass one or more semantic session files to collect only those sessions:
-
-```bash
-uv run ida-nexus logs session-a.jsonl session-b.jsonl -o selected.zip
-```
-
-The ZIP contains `ida-nexus-logs.json`, a schema-versioned JSON table of
-contents mapping semantic and agent session paths to archive members. Missing
-linked transcripts are recorded in the TOC and reported as warnings.
-Operational logs are preserved beneath `logs/` without TOC entries because the
-dashboard does not resolve or render them. Open a bundle without accessing the
-receiving machine's transcript paths with:
-
-```bash
-uv run ida-nexus dashboard --archive support.zip --open
-```
-
-`--sessions-zip` is an alias for `--archive`.
-
-## Migrating pre-0.2 logs
-
-The one-shot migration utility intentionally remains a project script rather
-than an installed command:
-
-```bash
-uv run python scripts/migrate_logs.py --dry-run
-uv run python scripts/migrate_logs.py --dry-run --verbose  # print every discarded record
-uv run python scripts/migrate_logs.py
-```
-
-It reads legacy logs from `<IDAUSR>/nexus/logs`, reconstructs sessions using
-per-request agent transcript paths or GUIDs, and writes the 0.2 schema under
-`<IDAUSR>/nexus/sessions`.
-
-Migration never modifies source logs. Known `bridge_output` records are
-operational noise, so the default output reports a count per source file while
-leaving the originals intact. `--verbose` prints every discarded record.
-Unknown, malformed, and unattributable records are always printed with their
-source file and line number rather than entering the permanent dashboard
-schema.
 
 ## Running a worker directly
 

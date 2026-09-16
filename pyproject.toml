@@ -8,8 +8,6 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "ida-domain>=0.5.1",
-    "zeromcp>=1.10.0",
-    "packaging",
 ]
 
 [project.urls]

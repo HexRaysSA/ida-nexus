@@ -8,16 +8,15 @@ directly.
 The main data path is:
 
 ```text
-Claude/Codex MCP config ─┐
-Pi/oh-my-pi extension ───┴─> ZeroMCP adapter -> DatabaseManager -> DatabaseHandle
-                                                                  │
-                                      private registry <──────────┤
-                                                                  ├─ SSE lease
-                                                                  └─ HTTP RPC
-                                                                         │
-                                                GUI plugin or idalib worker
-                                                                         │
-                                                              IDARuntime -> IDA
+MCP / TUI / application adapter -> DatabaseManager -> DatabaseHandle
+                                                       │
+                                      private registry <┤
+                                                       ├─ SSE lease
+                                                       └─ HTTP RPC
+                                                              │
+                                             GUI plugin or idalib worker
+                                                              │
+                                                   IDARuntime -> IDA
 ```
 
 The filesystem registry provides discovery and process liveness; the SSE
@@ -37,14 +36,9 @@ connection expresses one client's interest in an already-running database.
 | `ida_nexus/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease and IDB-event streams, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
 | `ida_nexus/manager.py` | Protocol-agnostic database attachment, local selection and discovery, lease cleanup, and lifecycle events. |
 | `ida_nexus/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Nexus Python runtime. |
-| `ida_nexus/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
+| `ida_nexus/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in an adapter process. |
 | `ida_nexus/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
-| `ida_nexus/mcp.py` | Reusable ZeroMCP tools and transports, manager composition, error mapping, startup attachment, and semantic session tracing. |
-| `ida_nexus/cli/` | Implements the single `ida-nexus` entry point plus thin MCP, dashboard, execution, logs, benchmark, and internal worker command adapters. |
-| `ida_nexus/cli/mcp.py` | Parses MCP CLI and agent-hook arguments, then invokes the reusable `ida_nexus.mcp` API. |
-| `ida_nexus/cli/dashboard.py` | Renders semantic session traces and linked agent transcripts from the local state directory or a portable log ZIP. |
-| `ida_nexus/cli/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
-| `scripts/migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
+| `ida_nexus/cli/` | Implements the single `ida-nexus` entry point plus reference, execution, benchmark, and internal worker command adapters. |
 
 ## State layout
 
@@ -54,7 +48,7 @@ connection expresses one client's interest in an already-running database.
   instances/<record-id>.lock       held for the instance lifetime
   spawn/<idb-key>.lock             serializes worker creation
   logs/<record-id>.log             idalib worker stdout/stderr
-  sessions/<mcp-server-id>.jsonl   semantic MCP/agent trace
+  sessions/                         adapter-owned semantic sessions (IDA MCP)
 ```
 
 `<state-dir>` is `IDA_NEXUS_STATE_DIR` when that variable is set. Otherwise
@@ -69,9 +63,10 @@ and also correlates a Windows console launcher with its Python child.
 
 The registry record contains the backend (`gui` or `idalib`), PID, endpoint,
 authentication token, protocol version, canonical executable and IDB paths,
-IDB key, managed flag, and start time. Registry and session directories are
-private to the user; records, traces, and worker logs are created with private
-permissions.
+IDB key, managed flag, and start time. Nexus registry and log directories are
+private to the user; records and worker logs are created with private
+permissions. Adapters are responsible for permissions on their own files under
+the shared state root.
 
 ## Database identity
 
@@ -155,8 +150,8 @@ disk permanently to avoid split-inode locking races.
    database opening, so Nexus opens with it deferred and advances bounded
    analysis slices from a server-owned thread. Each slice uses the normal IDA
    operation dispatcher and then releases it, allowing low-level clients to
-   execute between slices. The MCP deliberately still waits on the completion
-   barrier before its first execution.
+   execute between slices. An adapter may still choose to wait on the
+   completion barrier before model-authored execution.
 
 Public `DatabaseOpenOptions` exposes the complete `IdaCommandOptions` import
 surface to managed workers: analysis mode, image base, fresh/output database,
@@ -174,8 +169,8 @@ instance. When a worker reopens an existing IDB, Nexus
 drops source-import options instead of passing invalid loader switches to IDA.
 The worker-level `auto_analysis` policy is preserved because it controls whether
 analysis starts asynchronously after publication rather than configuring the
-loader. These controls belong to `DatabaseOpenOptions`, not the six-tool MCP
-surface.
+loader. These controls belong to `DatabaseOpenOptions`, not compact adapter
+surfaces.
 
 The spawn lock is held until the child becomes ready or fails. Startup waiting
 checks `Popen.poll()` without mistaking a successful Windows launcher handoff
@@ -220,18 +215,16 @@ avoids paying Windows thread-start scheduling latency on every fresh loopback
 connection while still growing for long-lived SSE leases. A failed operation
 POST is never retried because its execution status may be ambiguous.
 
-These guarantees apply to the per-database API. The optional ZeroMCP HTTP
-transport and dashboard have no built-in authentication; both default to local
-usage and warn when explicitly bound beyond loopback. Stdio is the normal MCP
-transport.
+These guarantees apply to the per-database API. Adapters that expose Nexus
+beyond loopback must provide their own transport security and authentication.
 
 `IDARuntime` serializes operations and dispatches them through
 `ida_kernwin.execute_sync`. Worker background autoanalysis uses bounded
 `auto_make_step()` slices, releasing that serialization point between slices;
 this mirrors the GUI's idle-driven analysis and preserves the low-level API's
 ability to execute while initial analysis is still running. An explicit
-`wait_autoanalysis()` remains a blocking drain, and the MCP intentionally uses
-that barrier before model-authored execution. The current ida-domain `Database` is available
+`wait_autoanalysis()` remains a blocking drain for adapters that need a
+completion barrier. The current ida-domain `Database` is available
 globally as `db`, alongside the imported `ida_domain` package. Ordinary
 statements execute once, and a single or trailing expression becomes the
 result. As an alternative, code without a trailing
@@ -349,9 +342,8 @@ should preserve it for:
   behavior above;
 - new optional registry, health, request, response, or error-detail fields;
 - new optional routes that old peers may safely reject;
-- changes to MCP tools, worker CLI options, semantic traces, dashboard output,
-  or agent integrations. The trace format has its own `schema` field, while MCP
-  has its own protocol negotiation.
+- changes to adapter tools, worker CLI options, semantic traces, dashboard
+  output, or agent integrations. Those are outside the private Nexus protocol.
 
 Bump `PROTOCOL_VERSION` only when an existing peer could no longer interoperate
 safely—for example, when removing or changing the type or meaning
@@ -438,146 +430,27 @@ fail closed.
 immediately before and after user code. The second flush runs when user code
 returns or raises a Python exception; a native process crash cannot reach it.
 License configurations that reject flushing do not block execution. Successful
-flushes do not pack the IDB. The option defaults to false for the public Python
-API and CLI. The MCP tool deliberately does not expose this policy decision to
-the model.
+flushes do not pack the IDB. The option defaults to false for the public Python API and CLI. Adapters decide
+whether to expose this policy to their callers.
 
 
-## MCP model
+## MCP adapters
 
-The MCP server keeps MCP-local opaque `instance_id` values mapped to
-`DatabaseHandle` objects. Reopening the same registry record within one MCP
-server reuses the existing local session and retains only one lease. Separate
-MCP servers retain independent leases. Registry discovery lets
-`list_databases()` also report GUI and idalib instances that this MCP server
-has not yet attached to; local handles are annotated with their `instance_id`
-and current-target state. If a lease connection dies, its MCP-local
-`instance_id` is invalidated immediately. Nexus never silently reconnects
-or replaces the database; the agent must discover and open it again.
+IDA Nexus is protocol-agnostic. MCP servers and other adapters build on the
+public `DatabaseManager`, `DatabaseHandle`, discovery, and reference APIs. The
+official server, semantic session tracing, dashboard, transcript hooks, and log
+archive tooling live in [ida-mcp](https://github.com/HexRaysSA/ida-mcp).
 
-Tools are:
-
-| Tool | Behavior |
-|---|---|
-| `reference(query)` | Search the installed ida-domain API reference. |
-| `open_database(path, set_current=True)` | Attach to a GUI or shared managed worker. |
-| `execute_python(code, instance_id=None, timeout=360, filename=None)` | Wait without a deadline for initial autoanalysis once through a separate handle request, then execute Python against the selected handle with the numeric execution-only timeout. Flush policy is not model-controlled. |
-| `list_databases()` | Discover registered instances and identify this MCP server's handles. |
-| `save_database(instance_id=None)` | Explicitly save the selected database. |
-| `close_database(instance_id=None)` | Release this MCP server's handle. If that commits final managed shutdown, wait up to 305 seconds for the IDB close and lifetime-lock release; it is not a global close. |
-
-`--database` schedules a startup attachment without blocking MCP
-initialization; an operation that needs the current target waits for that
-startup attempt. The server normally runs over stdio, with an opt-in reusable
-ZeroMCP HTTP transport. HTTP can run in background embedding mode or unattended
-foreground mode. A host may supply a `DatabaseManager` subclass and constructor
-arguments, register traced tools with `ida_nexus.mcp.tool`, and select a native
-ZeroMCP HTTP path prefix without importing CLI implementation details. The Pi
-extension is an MCP client adapter rather than a second implementation of these tools.
-The MCP adapter explicitly applies the initial
-analysis policy before calling the session manager's `execute_python`; the
-upstream route and handle execution method remain independent of analysis. The
-initial analysis wait is unbounded and does not consume the MCP tool's separate
-execution timeout. Stdio uses ZeroMCP's concurrent async dispatcher so MCP
-`notifications/cancelled` can arrive during analysis or execution. The async
-tool sends a separate operation-id-scoped cancellation request and waits for
-IDA to unwind safely before abandoning the MCP request without a response.
-
-On stdio EOF, SIGINT, SIGTERM, or normal interpreter exit, the MCP server
-releases all handles. Other agents continue uninterrupted. If the released
-lease was the last lease on a managed worker, that worker performs its own
-shutdown, and the server waits for that worker's IDB to finish closing:
-releasing a lease only asks the worker to pack, so exiting first would let
-whatever stops this process kill a still-writing worker and leave a stale or
-truncated `.i64`. Handles are released concurrently under one 305-second
-budget; a worker that overruns it is reported and abandoned rather than
-blocking exit. MCP and direct library leases remain indefinite unless they
-opt in.
-The MCP accepts `--idle-timeout` or `IDA_NEXUS_MCP_IDLE_TIMEOUT`; zero disables
-idle release explicitly.
-
-## Semantic sessions and agent metadata
-
-The MCP server writes one session-oriented JSONL trace to:
-
-```text
-<state-dir>/sessions/<mcp-server-id>.jsonl
-```
-
-Every record includes schema version, timestamp, MCP server ID, MCP PID, and an
-event. `mcp_started` records the optional `--agent` label, while
-`mcp_initialized` records the MCP client's `clientInfo` and `_meta`. Tool
-activity is represented by `tool_call`, `tool_result`, and `tool_error`, paired
-by `call_id`. Database binding events contain MCP-local and registry identity,
-including the worker operational log path, and inherit the active `call_id`
-when emitted during a tool invocation.
-
-Unexpected database disconnection adds `level: "warning"` to that semantic
-event. With ZeroMCP 1.10 or newer, an active stdio transport also sends
-`notifications/message` at warning level under logger `ida_nexus.database`.
-The data object contains the `database_lost` event name, human-readable message,
-MCP-local instance ID, disconnect reason, complete target identity,
-`database_state` probe result, and whether crash recovery is required. Warning
-delivery is best effort because ZeroMCP does not support logging notifications
-over Streamable HTTP; trace emission is transport-independent.
-
-Agent integrations attach transcript paths as hidden `_meta` fields using the
-`<agent-kind>_session_path` convention (for example, `omp_session_path`). The
-MCP adapter promotes those fields into request metadata and removes them from
-public tool arguments. Each tool event records the applicable `nexus_id` and
-agent transcript path under `session`. The optional MCP `--agent` value is a
-process-level display and operation label; transcript correlation uses the
-request metadata because one MCP process can serve multiple agent sessions and
-agent kinds. This also supports several agents sharing one IDA worker.
-
-Semantic tracing remains at the MCP layer because only that layer can observe
-`reference`, list operations, resolution failures, and agent metadata. Worker
-logs are operational and correlate through `record_id` and timestamps.
-
-The dashboard reads the semantic session schema. It correlates calls and
-results by ID while rendering each at its own timestamp, links enclosed legacy
-database events to their unambiguous call interval, renders executed Python and
-reference output, distinguishes MCP results and model-facing errors from
-internal diagnostic metadata, lists all database targets and best-effort
-transcript model names, and interleaves non-IDA activity from referenced agent
-transcripts. The log exporter and dashboard recognize any agent kind that uses
-the `<agent-kind>_session_path` metadata convention. Timestamped agent records
-outside the recognized Claude, Codex, and Pi event shapes are retained as
-collapsed raw-JSON fallback events instead of being silently discarded. The
-dashboard can also auto-detect the benchmark run
-layout, select Pi's active transcript branch, summarize available token/cost
-data, and export a self-contained session page. Its `/agent` route serves only
-transcript paths referenced by discoverable semantic sessions.
-
-`ida-nexus logs` packages all local semantic sessions by default, or only
-explicitly named session files, together with every available linked agent
-transcript, OMP child transcripts stored beside a linked parent transcript, and
-every file under the operational `logs/` directory. Including the sibling child
-group preserves agents that never received a Nexus route and therefore emitted
-no semantic session. The root
-`ida-nexus-logs.json` TOC records schema/version, checksums,
-original-to-archive path mappings, per-session transcript references, and
-missing references for semantic and agent sessions. Operational files are
-preserved under `logs/` without TOC entries. The dashboard validates checksums
-and extracts only TOC-listed session members into a private temporary directory
-when started with `--archive`; unresolved archive references are never read
-from the receiving machine's filesystem.
-
-## Legacy migration
-
-`scripts/migrate_logs.py` reads transitional schema-1 traces from `logs/mcp/` and older
-bridge JSONL files from `logs/`, then writes normalized session files under
-`sessions/`. It never modifies source logs, sanitizes destination names, and
-reports malformed, unknown, or unattributable records instead of silently
-placing them in the permanent schema. Known `bridge_output` noise is counted
-and intentionally discarded from migrated sessions.
+For continuity with existing installations, IDA MCP stores semantic sessions
+under this repository's shared state root at `sessions/`. Nexus owns resolution
+of that state root but does not produce or interpret those session files.
 
 ## Failure behavior
 
 | Failure | Result |
 |---|---|
-| MCP/client exits cleanly | Its leases close; other clients continue. |
-| MCP/client is killed | Kernel closes sockets; heartbeat observes the loss. |
+| Client exits cleanly | Its leases close; other clients continue. |
+| Client is killed | Kernel closes sockets; heartbeat observes the loss. |
 | Managed worker is killed | Lifetime lock releases; stale metadata is reaped on scan. |
 | Protocol version differs | Instance is `BLOCKED` before HTTP probing; no replacement is spawned. |
 | Health times out | Instance is `BLOCKED`; no replacement is spawned. |
@@ -585,7 +458,7 @@ and intentionally discarded from migrated sessions.
 | Worker begins idle shutdown before the first lease | The handle resolves and attempts attachment once more. |
 | GUI or worker disappears after opening | Its `instance_id` is invalidated; the next operation tells the agent to list and open again. |
 | RPC connection fails during a POST | The connection is discarded, but the operation is not retried because it may already have executed. |
-| Response contains an IDA error | Structured code, status, details, and traceback reach MCP tracing. |
+| Response contains an IDA error | Structured code, status, details, and traceback reach the calling adapter. |
 
 The architecture deliberately favors harmless stale files and reloadable
 workers over cross-client shutdown authority or ownership bookkeeping.

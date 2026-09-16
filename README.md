@@ -28,15 +28,6 @@ for more information on installing the MCP.
 ## CLI
 
 ```bash
-# MCP server (stdio/http)
-uvx ida-nexus mcp --agent=my-agent
-
-# Inspect MCP session logs
-uvx ida-nexus dashboard --open
-
-# Export MCP session logs to ZIP
-uvx ida-nexus logs
-
 # IDA Domain API reference
 uvx ida-nexus reference "decompile function"
 
@@ -96,9 +87,8 @@ between slices, while `wait_autoanalysis()` explicitly drains the same lifecycle
 After a successful explicit wait, both runtime and persistent autoanalysis stay
 enabled, including when initial analysis had already finished. This setting is
 saved with the database. Failed or cancelled waits restore the prior settings;
-polling and background slices do not opt into this policy.
-The MCP intentionally waits before model-authored execution.
-A persistently disabled GUI reports an immediately usable `disabled` analysis
+polling and background slices do not opt into this policy. An adapter can choose
+to wait before model-authored execution. A persistently disabled GUI reports an immediately usable `disabled` analysis
 status without confusing IDA's temporary suspension during GUI actions.
 `execute_python()` is stateless by default; pass `persist_globals=True` to keep
 a lease-scoped Python namespace between calls.
@@ -127,8 +117,8 @@ configurations that reject flushing do not block Python execution. The first
 flush protects earlier work; the second protects changes made by the snippet
 when execution returns or raises a Python exception. A native process crash
 cannot run the second flush. The public Python API, HTTP endpoint, and
-`ida-nexus python --flush-database` expose this policy; the MCP tool does not let
-the model select it.
+`ida-nexus python --flush-database` expose this policy; adapters decide whether
+to expose it to their callers.
 
 `probe_database_state(path)` combines the `.id0` OS lock with its B-tree
 `isTreeOpen` byte and reports `missing`, `packed`, `in_use`, `crashed`,
@@ -142,12 +132,10 @@ open a new one. `DatabaseHandle.recovery` and `DatabaseManager.open_database()`'
 | `repaired` | Only dirty unpacked files existed. IDA repaired them and Nexus immediately created a packed base. |
 | `restored` | A packed base existed. Nexus preserved the dirty unpacked files in an adjacent `<idb>.crash-*` directory, then restored the packed base. Changes newer than that packed base are not active automatically. |
 
-Unexpected disconnection records `database_disconnected` at warning level in
-the semantic session trace. Stdio MCP clients also receive a ZeroMCP
-`notifications/message` warning from logger `ida_nexus.database`. Its structured
-data contains `event`, `message`, `instance_id`, `reason`, `target`,
-`database_state`, and `recovery_required`. Streamable HTTP does not currently
-support MCP logging notifications; the semantic warning record is still written.
+Adapters can use the manager's `database_disconnected` event to report an
+unexpected worker or GUI loss. The official IDA MCP server records that event
+in its semantic session trace and sends an MCP logging notification when the
+transport supports one.
 
 An unregistered live IDA holding the `.id0` lock causes `DatabaseBusyError`.
 Missing `.id0`, malformed headers, partial component sets, and custom output
@@ -168,9 +156,7 @@ options = DatabaseOpenOptions(idle_timeout=900)
 The deadline is suspended while that lease has an active request and restarts
 when the request finishes. GUI and unmanaged-idalib handles ignore it.
 `keepalive` is separate: it delays worker shutdown only after a lease is released.
-MCP leases are also indefinite by default. Opt into idle release with
-`ida-nexus mcp --idle-timeout 900` or set
-`IDA_NEXUS_MCP_IDLE_TIMEOUT=900`; passing zero explicitly disables it.
+Adapters such as IDA MCP choose their own default and configuration policy.
 
 Database changes are available as a closeable, blocking iterator. Each item is
 one structured IDB hook event with a monotonically increasing `revision`, a
