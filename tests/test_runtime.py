@@ -195,7 +195,7 @@ def test_save_requires_database_and_respects_ida_failure_and_gui_save_as(
     runtime = object.__new__(IDARuntime)
     runtime.backend = backend
     # Isolate the IDA save contract; scheduler/transport are covered separately.
-    runtime._run_sync = lambda callback, **_kwargs: callback()
+    monkeypatch.setattr(runtime, "_run_sync", lambda callback, **_kwargs: callback())
     if error_code:
         with pytest.raises(APIError) as error:
             runtime.save_database()
@@ -540,9 +540,9 @@ def waiting_runtime(gui_runtime, monkeypatch):
         return True
 
     auto = sys.modules["ida_auto"]
-    auto.enable_auto = enable_auto
-    auto.auto_wait = auto_wait
-    auto.auto_is_ok = lambda: True
+    monkeypatch.setattr(auto, "enable_auto", enable_auto, raising=False)
+    monkeypatch.setattr(auto, "auto_wait", auto_wait, raising=False)
+    monkeypatch.setattr(auto, "auto_is_ok", lambda: True, raising=False)
     monkeypatch.setitem(
         sys.modules,
         "ida_ida",

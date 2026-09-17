@@ -5,7 +5,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 from ._registry import (
     DEFAULT_TIMEOUT,
@@ -275,6 +275,11 @@ def _build_worker_command(
     return command
 
 
+class _SpawnEnvironment(TypedDict, total=False):
+    env: dict[str, str]
+    cwd: str
+
+
 def spawn_worker(
     source: str,
     expected_idb: str,
@@ -297,7 +302,7 @@ def spawn_worker(
     )
     # Left out entirely when unset, so the worker keeps inheriting this
     # process as it always has.
-    spawn_environment: dict[str, Any] = {}
+    spawn_environment: _SpawnEnvironment = {}
     if options.worker_env is not None:
         spawn_environment["env"] = dict(options.worker_env)
     if options.worker_cwd is not None:

@@ -109,6 +109,7 @@ def test_failed_publication_leaves_no_partial_record_and_can_retry(
         assert list(registration.directory.glob("*.tmp")) == []
         entry = registration.publish(12345)
         assert registration.publish(54321) is entry
+        assert registration.registry_path is not None
         assert registry.load_registry_entry(registration.registry_path) == entry
     finally:
         registration.release()
@@ -123,5 +124,6 @@ def test_failed_health_probe_blocks_live_owner_without_reaping(published, monkey
     assert len(found) == 1
     assert found[0].instance == entry
     assert found[0].state is InstanceState.BLOCKED
+    assert found[0].detail is not None
     assert "identity mismatch" in found[0].detail
     assert registration.registry_path.exists()

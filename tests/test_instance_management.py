@@ -321,7 +321,7 @@ def test_a_pinned_worker_environment_is_checked_and_snapshotted() -> None:
     assert options.worker_env == {"PATH": "/bin"}
 
     with pytest.raises(TypeError, match="must be strings"):
-        DatabaseOpenOptions(worker_env={"PATH": 1})
+        DatabaseOpenOptions(worker_env=cast(Any, {"PATH": 1}))
     with pytest.raises(ValueError, match="not usable"):
         DatabaseOpenOptions(worker_env={"A=B": "1"})
     with pytest.raises(ValueError, match="must not be empty"):
@@ -2188,19 +2188,26 @@ def test_listing_databases_is_one_implementation(monkeypatch) -> None:
     from ida_nexus import list_databases
     from ida_nexus._registry import DiscoveredDatabase, InstanceState
 
-    entry = SimpleNamespace(
+    entry = DatabaseInstance(
         record_id="rec-1",
         backend="idalib",
         idb_path="/w/target.i64",
         exe_path="",
         idb_key="k",
+        pid=123,
+        port=12345,
+        _token="test-token",
+        version=PROTOCOL_VERSION,
+        managed=True,
+        started_at=0.0,
     )
-    other = SimpleNamespace(
+    other = replace(
+        entry,
         record_id="rec-2",
         backend="gui",
         idb_path="/w/other.i64",
-        exe_path="",
         idb_key="k2",
+        managed=False,
     )
     monkeypatch.setattr(
         "ida_nexus.instances.discover_databases",
@@ -2223,12 +2230,18 @@ def test_a_lease_the_scan_missed_is_still_listed(monkeypatch) -> None:
     """It remains usable, so hiding it during a transient scan would be wrong."""
     from ida_nexus import list_databases
 
-    entry = SimpleNamespace(
+    entry = DatabaseInstance(
         record_id="rec-1",
         backend="idalib",
         idb_path="/w/target.i64",
         exe_path="",
         idb_key="k",
+        pid=123,
+        port=12345,
+        _token="test-token",
+        version=PROTOCOL_VERSION,
+        managed=True,
+        started_at=0.0,
     )
     monkeypatch.setattr(
         "ida_nexus.instances.discover_databases", lambda _timeout=1.0: []

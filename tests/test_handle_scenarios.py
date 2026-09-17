@@ -105,6 +105,7 @@ def test_idle_rpc_connection_is_recycled_without_replacing_lease(databases):
     with DatabaseHandle.attach(server.entry) as handle:
         handle.execute_python("first")
         connection = handle._rpc_connection
+        assert connection is not None
         origin = handle.event_origin_id
         handle._rpc_last_used = time.monotonic() - 60
         handle.execute_python("second")

@@ -12,6 +12,7 @@ from typing import Any, Self
 from ._registry import HOST, DatabaseInstance, _event_origin_id
 from ._resolver import resolve_instance
 from .database_state import (
+    DatabaseFileState,
     DatabaseRecovery,
     probe_database_state,
 )
@@ -501,7 +502,7 @@ class DatabaseHandle:
         return connection, response, lease_socket
 
     @staticmethod
-    def _crashed_database_state(entry: DatabaseInstance) -> dict[str, Any] | None:
+    def _crashed_database_state(entry: DatabaseInstance) -> DatabaseFileState | None:
         state = probe_database_state(entry.idb_path)
         return state if state["state"] == "crashed" else None
 
