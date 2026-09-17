@@ -64,3 +64,7 @@ class DatabaseCrashedError(DatabaseDisconnectedError):
     def __init__(self, message: str, database_state: "DatabaseFileState") -> None:
         super().__init__(message)
         self.database_state = database_state
+
+
+class MigrationError(NexusConnectionError):
+    """A requested ownership transition failed; database files are preserved."""
