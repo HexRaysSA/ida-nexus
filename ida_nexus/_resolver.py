@@ -24,6 +24,7 @@ from .database_state import (
     _backup_unpacked_database,
     expected_idb_path,
     probe_database_state,
+    unpacked_database_paths,
 )
 from .errors import (
     AmbiguousDatabaseError,
@@ -61,7 +62,7 @@ class WorkerLaunchOptions:
     processor: str | None = None
     db_compression: str | None = None
     run_debugger: str | None = None
-    load_resources: bool = False
+    load_resources: bool = True
     script_file: str | None = None
     script_args: tuple[str, ...] = ()
     file_type: str | None = None
@@ -187,14 +188,20 @@ def _build_worker_command(
         if os.path.exists(expected_idb)
         else source
     )
-    if input_path == expected_idb and input_path != source:
-        # Loader/import switches are baked into an existing IDB. Passing them
-        # again can make IDA terminate with a fatal error (for example, -b may
-        # be used only while loading a new file), so an existing database is
-        # reopened without source-import configuration.
-        # Autoanalysis is a worker lifecycle policy, not a source-import
-        # option baked into the IDB. Preserve it while dropping loader flags.
-        options = WorkerLaunchOptions(auto_analysis=options.auto_analysis)
+    if not options.new_database and (
+        input_path == expected_idb or unpacked_database_paths(expected_idb)[0].exists()
+    ):
+        # Loader/import switches are baked into an existing IDB, packed or
+        # unpacked. Passing them again makes IDA terminate with a fatal error
+        # (-b and -R may be used only while loading a new file), so an existing
+        # database is reopened without source-import configuration.
+        # Autoanalysis and saving are worker lifecycle policy, not options
+        # baked into the IDB, so they survive.
+        options = WorkerLaunchOptions(
+            auto_analysis=options.auto_analysis,
+            save_after_open=options.save_after_open,
+            load_resources=False,
+        )
     command = [
         *launcher,
         input_path,
@@ -463,7 +470,7 @@ def resolve_instance(
     processor: str | None = None,
     db_compression: str | None = None,
     run_debugger: str | None = None,
-    load_resources: bool = False,
+    load_resources: bool = True,
     script_file: str | os.PathLike[str] | None = None,
     script_args: Sequence[str] = (),
     file_type: str | None = None,

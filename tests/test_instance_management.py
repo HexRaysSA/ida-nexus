@@ -1211,6 +1211,63 @@ def test_existing_idb_drops_source_import_options(tmp_path: Path) -> None:
     assert "--image-base" not in command
     assert "--processor" not in command
     assert "--file-type" not in command
+    assert "--load-resources" not in command
+
+
+def test_resources_load_by_default_for_new_databases(tmp_path: Path) -> None:
+    source = tmp_path / "sample.exe"
+    source.write_bytes(b"binary")
+
+    assert DatabaseOpenOptions().load_resources is True
+    command = resolver_mod._build_worker_command(
+        str(source),
+        str(tmp_path / "sample.exe.i64"),
+        20.0,
+        resolver_mod.WorkerLaunchOptions(),
+        launcher=["ida-nexus", "worker"],
+        record_suffix="abcdef",
+    )
+    assert "--load-resources" in command
+
+
+def test_opening_an_idb_directly_drops_source_import_options(tmp_path: Path) -> None:
+    idb = tmp_path / "sample.exe.i64"
+    idb.write_bytes(b"database")
+
+    command = resolver_mod._build_worker_command(
+        str(idb),
+        str(idb),
+        20.0,
+        resolver_mod.WorkerLaunchOptions(load_resources=True, processor="arm"),
+        launcher=["ida-nexus", "worker"],
+        record_suffix="abcdef",
+    )
+
+    assert command[:3] == ["ida-nexus", "worker", str(idb)]
+    assert "--load-resources" not in command
+    assert "--processor" not in command
+
+
+def test_unpacked_database_drops_import_options_but_keeps_save(tmp_path: Path) -> None:
+    source = tmp_path / "sample.exe"
+    source.write_bytes(b"binary")
+    (tmp_path / "sample.exe.id0").write_bytes(b"unpacked")
+
+    command = resolver_mod._build_worker_command(
+        str(source),
+        str(tmp_path / "sample.exe.i64"),
+        20.0,
+        resolver_mod.WorkerLaunchOptions(
+            load_resources=True, processor="arm", save_after_open=True
+        ),
+        launcher=["ida-nexus", "worker"],
+        record_suffix="abcdef",
+    )
+
+    assert command[:3] == ["ida-nexus", "worker", str(source)]
+    assert "--load-resources" not in command
+    assert "--processor" not in command
+    assert "--save-after-open" in command
 
 
 def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
@@ -2172,6 +2229,39 @@ def test_the_manager_pins_its_workers_like_a_handle_does(monkeypatch) -> None:
 
     assert captured["options"].worker_env == {"PATH": "/bin"}
     assert captured["options"].worker_cwd == "/srv/work"
+
+
+def test_manager_forwards_import_options_under_its_own_policy(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_open(path, *, options=None, on_disconnect=None):
+        captured["options"] = options
+        raise NexusConnectionError("stop before starting IDA")
+
+    monkeypatch.setattr(client_mod.DatabaseHandle, "open", fake_open)
+    manager = DatabaseManager(open_timeout=42.0, worker_cwd="/srv/work")
+    with pytest.raises(NexusConnectionError):
+        manager.open_database("firmware.bin", set_current=True)
+    assert captured["options"].load_resources is True
+
+    with pytest.raises(NexusConnectionError):
+        manager.open_database(
+            "firmware.bin",
+            set_current=True,
+            options=DatabaseOpenOptions(
+                load_resources=False,
+                processor="arm",
+                startup_timeout=1.0,
+                worker_cwd="/elsewhere",
+                auto_analysis=False,
+            ),
+        )
+    options = captured["options"]
+    assert options.load_resources is False
+    assert options.processor == "arm"
+    assert options.startup_timeout == 42.0
+    assert options.worker_cwd == "/srv/work"
+    assert options.auto_analysis is True
 
 
 def test_an_unusable_pin_is_refused_where_it_was_written() -> None:

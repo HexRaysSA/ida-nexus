@@ -58,7 +58,7 @@ class DatabaseOpenOptions:
     processor: str | None = None
     db_compression: str | None = None
     run_debugger: str | None = None
-    load_resources: bool = False
+    load_resources: bool = True
     script_file: str | Path | None = None
     script_args: tuple[str, ...] = ()
     file_type: str | None = None

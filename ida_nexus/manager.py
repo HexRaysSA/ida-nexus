@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
@@ -187,7 +187,14 @@ class DatabaseManager:
             database_state=database_state,
         )
 
-    def open_database(self, path: str, *, set_current: bool) -> OpenDatabaseResult:
+    def open_database(
+        self,
+        path: str,
+        *,
+        set_current: bool,
+        options: DatabaseOpenOptions | None = None,
+    ) -> OpenDatabaseResult:
+        """Attach to ``path``; the manager's lifecycle settings override ``options``."""
         # Do NOT require the path to exist on disk here. A live instance (e.g. an
         # unsaved GUI database whose .i64 has not been written yet) may be
         # registered for this path; resolve_instance matches the registry first
@@ -225,7 +232,8 @@ class DatabaseManager:
             if existing is None:
                 handle = DatabaseHandle.open(
                     resolved_path,
-                    options=DatabaseOpenOptions(
+                    options=replace(
+                        options or DatabaseOpenOptions(),
                         startup_timeout=self._open_timeout,
                         keepalive=self._keepalive,
                         idle_timeout=self._idle_timeout,
