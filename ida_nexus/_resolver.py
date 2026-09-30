@@ -380,9 +380,9 @@ def _await_ready(
     deadline: float,
 ) -> DatabaseInstance:
     expected_key = idb_key(expected_idb)
-    # Windows console-script launchers may keep a wrapper PID while Python runs
-    # the worker as a child. The random suffix is passed explicitly to that
-    # worker and is therefore the stable launch identity across both processes.
+    # Launcher and worker PIDs may differ, and unrelated workers in different
+    # PID namespaces may share a numeric PID. Only the random suffix passed
+    # explicitly to the worker identifies this launch.
     record_suffix = log_path.stem.rsplit("-", 1)[-1]
     last_detail: str | None = None
     actual_log_path = log_path
@@ -409,9 +409,7 @@ def _await_ready(
         matched_record = False
         for instance in instances:
             entry = instance.instance
-            launched_by_us = entry.pid == process.pid or entry.record_id.endswith(
-                f"-{record_suffix}"
-            )
+            launched_by_us = entry.record_id.endswith(f"-{record_suffix}")
             if not launched_by_us:
                 continue
             matched_record = True

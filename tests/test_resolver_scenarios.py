@@ -43,13 +43,20 @@ def source(tmp_path):
 def records(source):
     with ExitStack() as cleanup:
 
-        def create(*, backend="idalib", state=InstanceState.READY, path=None):
+        def create(
+            *,
+            backend="idalib",
+            state=InstanceState.READY,
+            path=None,
+            record_suffix=None,
+        ):
             registration = InstanceRegistration(
                 REGISTRY_DIR,
                 InstanceIdentity(
                     str(path or expected_idb_path(source)), str(source), backend
                 ),
                 token="test-token",
+                record_suffix=record_suffix,
             )
             cleanup.callback(registration.release)
             return DiscoveredDatabase(
@@ -185,6 +192,36 @@ def test_launcher_failure_reports_child_log_and_allows_retry(source, tmp_path):
     assert probe_database_state(source)["state"] == "missing"
 
 
+@pytest.mark.parametrize("same_database", [False, True])
+def test_await_ready_ignores_unrelated_record_with_same_pid(
+    source, records, monkeypatch, tmp_path, same_database
+):
+    unrelated = records(
+        path=None if same_database else tmp_path / "other.i64",
+        record_suffix="111111",
+    )
+    launched = records(record_suffix="abcdef")
+    # Different PID namespaces can publish the same numeric PID. Both real
+    # registrations here use this process's PID to reproduce that collision.
+    assert unrelated.instance.pid == launched.instance.pid
+    monkeypatch.setattr(
+        resolver, "_scan_until", lambda *_a, **_k: [unrelated, launched]
+    )
+
+    result = resolver._await_ready(
+        Mock(
+            spec=subprocess.Popen,
+            pid=launched.instance.pid,
+            poll=Mock(return_value=None),
+        ),
+        expected_idb_path(source),
+        tmp_path / f"{launched.instance.record_id}.log",
+        time.monotonic() + 1,
+    )
+
+    assert result == launched.instance
+
+
 def test_worker_ready_for_wrong_database_is_never_returned(
     source, records, monkeypatch, tmp_path
 ):
@@ -194,7 +231,7 @@ def test_worker_ready_for_wrong_database_is_never_returned(
         resolver._await_ready(
             Mock(spec=subprocess.Popen, pid=wrong.instance.pid),
             str(source),
-            tmp_path / "123-abcdef.log",
+            tmp_path / f"{wrong.instance.record_id}.log",
             time.monotonic() + 1,
         )
 
