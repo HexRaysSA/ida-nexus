@@ -457,7 +457,8 @@ def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
             subprocess.Popen[bytes],
             SimpleNamespace(pid=os.getpid(), poll=lambda: None),
         )
-        return process, tmp_path / "worker.log"
+        assert server.entry is not None
+        return process, tmp_path / f"{server.entry.record_id}.log"
 
     try:
         result = resolve_instance(
