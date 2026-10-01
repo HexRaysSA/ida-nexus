@@ -111,10 +111,16 @@ def test_explicit_output_does_not_attach_to_gui_for_same_executable(
         )
 
 
-def test_missing_source_releases_spawn_lock_for_later_retry(source):
+@pytest.mark.parametrize("relative", [False, True])
+def test_missing_source_releases_spawn_lock_for_later_retry(
+    source, monkeypatch, relative
+):
     source.unlink()
-    with pytest.raises(FileNotFoundError):
-        resolver.resolve_instance(source, spawner=never_spawn)
+    monkeypatch.chdir(source.parent)
+    path = source.name if relative else source
+    with pytest.raises(FileNotFoundError) as error:
+        resolver.resolve_instance(path, spawner=never_spawn)
+    assert str(error.value) == f"File not found: {source.resolve()}"
     lock = FileLock(SPAWN_DIR / f"{idb_key(expected_idb_path(source))}.lock")
     try:
         lock.acquire(timeout=0)
