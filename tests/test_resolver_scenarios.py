@@ -1,9 +1,11 @@
 """Safety gates before starting IDA; inject failures only at OS/race boundaries."""
 
+import subprocess
 import time
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from test_database_state import write_id0
@@ -190,7 +192,7 @@ def test_worker_ready_for_wrong_database_is_never_returned(
     monkeypatch.setattr(resolver, "_scan_until", lambda *_a, **_k: [wrong])
     with pytest.raises(WorkerStartError, match="expected"):
         resolver._await_ready(
-            SimpleNamespace(pid=wrong.instance.pid),
+            Mock(spec=subprocess.Popen, pid=wrong.instance.pid),
             str(source),
             tmp_path / "123-abcdef.log",
             time.monotonic() + 1,
@@ -211,7 +213,11 @@ def test_startup_timeout_keeps_last_health_failure_and_log(
     log.write_text("waiting for analysis", encoding="utf-8")
     with pytest.raises(WorkerStartError, match="timed out") as error:
         resolver._await_ready(
-            SimpleNamespace(pid=blocked.instance.pid, poll=lambda: None),
+            Mock(
+                spec=subprocess.Popen,
+                pid=blocked.instance.pid,
+                poll=Mock(return_value=None),
+            ),
             expected_idb_path(source),
             log,
             time.monotonic() + 0.03,

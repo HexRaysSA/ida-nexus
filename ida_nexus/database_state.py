@@ -176,6 +176,8 @@ def _read_posix_header(path: Path) -> tuple[bool | None, bytes | None, str | Non
 
 
 def _read_windows_header(path: Path) -> tuple[bool | None, bytes | None, str | None]:
+    if os.name != "nt":
+        raise RuntimeError("Windows database header reader requires Windows")
     from ctypes import wintypes
 
     generic_read = 0x80000000
