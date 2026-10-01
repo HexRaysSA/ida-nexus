@@ -568,7 +568,7 @@ def resolve_instance(
         if not spawn:
             raise NoDatabaseInstanceError(expected_idb)
         if not os.path.exists(source):
-            raise FileNotFoundError(source)
+            raise FileNotFoundError(f"File not found: {source}")
         file_state = probe_database_state(source, output_database=expected_idb)
         if file_state["state"] == "in_use":
             raise DatabaseBusyError(
