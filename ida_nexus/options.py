@@ -5,6 +5,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
+
+from .gui import GuiLaunchOptions
 
 MAX_KEEPALIVE_SECONDS = 3600.0
 
@@ -43,6 +46,8 @@ class DatabaseOpenOptions:
     idle_timeout: float | None = None
     worker_env: Mapping[str, str] | None = None
     worker_cwd: str | Path | None = None
+    backend: Literal["auto", "gui", "idalib"] = "auto"
+    gui: GuiLaunchOptions | None = None
     auto_analysis: bool = True
     image_base: int | None = None
     new_database: bool = False
@@ -69,6 +74,8 @@ class DatabaseOpenOptions:
     debug_flags: int | tuple[str, ...] = 0
 
     def __post_init__(self) -> None:
+        if self.backend not in {"auto", "gui", "idalib"}:
+            raise ValueError("backend must be auto, gui or idalib")
         if not math.isfinite(self.startup_timeout) or self.startup_timeout <= 0:
             raise ValueError("startup_timeout must be a positive finite number")
         if (

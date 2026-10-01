@@ -487,6 +487,22 @@ def test_autoanalysis_slices_release_before_completion(
     runtime.analysis_state = AnalysisState()
     steps = iter((True, False))
     calls: list[object] = []
+    in_native_dispatch = False
+    original_dispatch = runtime._run_sync
+
+    def dispatch(*args, **kwargs):
+        nonlocal in_native_dispatch
+        in_native_dispatch = True
+        try:
+            return original_dispatch(*args, **kwargs)
+        finally:
+            in_native_dispatch = False
+
+    monkeypatch.setattr(runtime, "_run_sync", dispatch)
+
+    def auto_is_ok():
+        assert in_native_dispatch, "IDA completion checks require the main thread"
+        return True
 
     def enable_auto(enabled: bool) -> bool:
         calls.append(("enable", enabled))
@@ -502,7 +518,7 @@ def test_autoanalysis_slices_release_before_completion(
         SimpleNamespace(
             enable_auto=enable_auto,
             auto_make_step=auto_make_step,
-            auto_is_ok=lambda: True,
+            auto_is_ok=auto_is_ok,
         ),
     )
     monkeypatch.setitem(sys.modules, "ida_idaapi", SimpleNamespace(BADADDR=-1))
