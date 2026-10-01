@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 from types import SimpleNamespace
 from typing import Any
@@ -523,6 +524,55 @@ def test_autoanalysis_slices_release_before_completion(
         ("step", 0, -1),
         ("enable", False),
     ]
+
+
+@pytest.mark.parametrize("analysis_complete", [False, True])
+def test_autoanalysis_completion_check_runs_on_ida_thread(
+    gui_runtime, monkeypatch, analysis_complete
+):
+    runtime, queued, _ = gui_runtime
+    ida_thread = threading.get_ident()
+    auto = sys.modules["ida_auto"]
+    checks = []
+    enabled = False
+
+    def enable_auto(value):
+        nonlocal enabled
+        assert threading.get_ident() == ida_thread
+        previous, enabled = enabled, value
+        return previous
+
+    def auto_is_ok():
+        assert threading.get_ident() == ida_thread
+        checks.append(True)
+        return analysis_complete
+
+    def execute_sync(callback, flags):
+        assert flags == 2
+        done = threading.Event()
+        queued.put((callback, done))
+        assert done.wait(timeout=5), "IDA thread did not dispatch the callback"
+        return 1
+
+    monkeypatch.setattr(auto, "enable_auto", enable_auto, raising=False)
+    monkeypatch.setattr(auto, "auto_make_step", lambda *_: False, raising=False)
+    monkeypatch.setattr(auto, "auto_is_ok", auto_is_ok, raising=False)
+    monkeypatch.setitem(sys.modules, "ida_idaapi", SimpleNamespace(BADADDR=-1))
+    monkeypatch.setattr(sys.modules["ida_kernwin"], "execute_sync", execute_sync)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(runtime.advance_autoanalysis)
+        callback, done = queued.get(timeout=5)
+        try:
+            callback()
+        finally:
+            done.set()
+        assert result.result(timeout=5) == {
+            "status": "complete" if analysis_complete else "running",
+            "complete": analysis_complete,
+        }
+    assert checks == [True]
+    assert enabled is False
 
 
 @pytest.fixture

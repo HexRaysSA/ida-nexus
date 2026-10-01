@@ -939,7 +939,7 @@ class IDARuntime:
                 deadline = time.monotonic() + max_seconds
                 for _ in range(max_steps):
                     if not ida_auto.auto_make_step(0, ida_idaapi.BADADDR):
-                        return True
+                        return ida_auto.auto_is_ok()
                     if time.monotonic() >= deadline:
                         break
                 return False
@@ -952,7 +952,7 @@ class IDARuntime:
             kind="analysis_slice",
             timeout=None,
         )
-        if completed and ida_auto.auto_is_ok():
+        if completed:
             self.analysis_state.mark_complete()
         return self.analysis_state.snapshot()
 
