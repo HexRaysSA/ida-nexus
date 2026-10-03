@@ -1,0 +1,254 @@
+[
+  {
+    "query": "list functions strings imports decompile function",
+    "target_groups": [
+      [
+        "ida_domain.functions.Functions.get_all",
+        "ida_domain.functions.Functions"
+      ],
+      [
+        "ida_domain.strings.Strings.get_all",
+        "ida_domain.strings.Strings"
+      ],
+      [
+        "ida_domain.imports.Imports.get_all_imports",
+        "ida_domain.imports.Imports.get_imports_for_module"
+      ],
+      [
+        "ida_domain.functions.Functions.get_pseudocode",
+        "ida_domain.pseudocode.Pseudocode.decompile"
+      ]
+    ],
+    "min_top5": 1,
+    "min_top20": 4
+  },
+  {
+    "query": "read bytes at address",
+    "target_groups": [
+      [
+        "ida_domain.bytes.Bytes.get_bytes_at"
+      ]
+    ],
+    "min_top5": 1,
+    "min_top20": 1
+  },
+  {
+    "query": "strings find text xrefs to address decompile function",
+    "target_groups": [
+      [
+        "ida_domain.strings.Strings.get_all",
+        "ida_domain.strings.Strings"
+      ],
+      [
+        "ida_domain.xrefs.Xrefs.to_ea"
+      ],
+      [
+        "ida_domain.functions.Functions.get_pseudocode",
+        "ida_domain.pseudocode.Pseudocode.decompile"
+      ]
+    ],
+    "min_top5": 2,
+    "min_top20": 3
+  },
+  {
+    "query": "Xrefs get_to Functions get_pseudocode",
+    "target_groups": [
+      [
+        "ida_domain.xrefs.Xrefs.to_ea"
+      ],
+      [
+        "ida_domain.functions.Functions.get_pseudocode"
+      ]
+    ],
+    "min_top5": 1,
+    "min_top20": 2
+  },
+  {
+    "query": "segments list functions decompile strings xrefs",
+    "target_groups": [
+      [
+        "ida_domain.segments.Segments.get_all",
+        "ida_domain.segments.Segments"
+      ],
+      [
+        "ida_domain.functions.Functions.get_all",
+        "ida_domain.functions.Functions"
+      ],
+      [
+        "ida_domain.functions.Functions.get_pseudocode",
+        "ida_domain.pseudocode.Pseudocode.decompile"
+      ],
+      [
+        "ida_domain.strings.Strings.get_all",
+        "ida_domain.strings.Strings"
+      ],
+      [
+        "ida_domain.xrefs.Xrefs.to_ea"
+      ]
+    ],
+    "min_top5": 1,
+    "min_top20": 5
+  },
+  {
+    "query": "list functions, decompile function, imports, strings, xrefs to address",
+    "target_groups": [
+      [
+        "ida_domain.functions.Functions.get_all",
+        "ida_domain.functions.Functions"
+      ],
+      [
+        "ida_domain.functions.Functions.get_pseudocode",
+        "ida_domain.pseudocode.Pseudocode.decompile"
+      ],
+      [
+        "ida_domain.imports.Imports.get_all_imports",
+        "ida_domain.imports.Imports.get_imports_for_module"
+      ],
+      [
+        "ida_domain.strings.Strings.get_all",
+        "ida_domain.strings.Strings"
+      ],
+      [
+        "ida_domain.xrefs.Xrefs.to_ea"
+      ]
+    ],
+    "min_top5": 1,
+    "min_top20": 4
+  },
+  {
+    "query": "Functions get_pseudocode get_name get_all",
+    "target_groups": [
+      [
+        "ida_domain.functions.Functions.get_pseudocode"
+      ],
+      [
+        "ida_domain.functions.Functions.get_name"
+      ],
+      [
+        "ida_domain.functions.Functions.get_all"
+      ]
+    ],
+    "min_top5": 3,
+    "min_top20": 3
+  },
+  {
+    "query": "names get_all bytes get_bytes",
+    "target_groups": [
+      [
+        "ida_domain.names.Names.get_all"
+      ],
+      [
+        "ida_domain.bytes.Bytes.get_bytes_at"
+      ]
+    ],
+    "min_top5": 2,
+    "min_top20": 2
+  },
+  {
+    "query": "strings imports functions decompile xrefs",
+    "target_groups": [
+      [
+        "ida_domain.strings.Strings.get_all",
+        "ida_domain.strings.Strings"
+      ],
+      [
+        "ida_domain.imports.Imports.get_all_imports",
+        "ida_domain.imports.Imports.get_imports_for_module"
+      ],
+      [
+        "ida_domain.functions.Functions.get_all",
+        "ida_domain.functions.Functions"
+      ],
+      [
+        "ida_domain.functions.Functions.get_pseudocode",
+        "ida_domain.pseudocode.Pseudocode.decompile"
+      ],
+      [
+        "ida_domain.xrefs.Xrefs.to_ea"
+      ]
+    ],
+    "min_top5": 2,
+    "min_top20": 5
+  },
+  {
+    "query": "Xrefs to_ea",
+    "target_groups": [
+      [
+        "ida_domain.xrefs.Xrefs.to_ea"
+      ]
+    ],
+    "min_top5": 1,
+    "min_top20": 1
+  },
+  {
+    "query": "functions add function",
+    "target_groups": [
+      [
+        "ida_domain.functions.Functions.create"
+      ]
+    ],
+    "min_top5": 0,
+    "min_top20": 0
+  },
+  {
+    "query": "list functions strings decompile function xrefs to address read bytes segments",
+    "target_groups": [
+      [
+        "ida_domain.functions.Functions.get_all",
+        "ida_domain.functions.Functions"
+      ],
+      [
+        "ida_domain.strings.Strings.get_all",
+        "ida_domain.strings.Strings"
+      ],
+      [
+        "ida_domain.functions.Functions.get_pseudocode",
+        "ida_domain.pseudocode.Pseudocode.decompile"
+      ],
+      [
+        "ida_domain.xrefs.Xrefs.to_ea"
+      ],
+      [
+        "ida_domain.bytes.Bytes.get_bytes_at"
+      ],
+      [
+        "ida_domain.segments.Segments.get_all",
+        "ida_domain.segments.Segments"
+      ]
+    ],
+    "min_top5": 2,
+    "min_top20": 5
+  },
+  {
+    "query": "strings xrefs to address decompile function bytes read",
+    "target_groups": [
+      [
+        "ida_domain.strings.Strings.get_all",
+        "ida_domain.strings.Strings"
+      ],
+      [
+        "ida_domain.xrefs.Xrefs.to_ea"
+      ],
+      [
+        "ida_domain.functions.Functions.get_pseudocode",
+        "ida_domain.pseudocode.Pseudocode.decompile"
+      ],
+      [
+        "ida_domain.bytes.Bytes.get_bytes_at"
+      ]
+    ],
+    "min_top5": 2,
+    "min_top20": 4
+  },
+  {
+    "query": "decompile function",
+    "target_groups": [
+      [
+        "ida_domain.functions.Functions.get_pseudocode",
+        "ida_domain.pseudocode.Pseudocode.decompile"
+      ]
+    ],
+    "min_top5": 1,
+    "min_top20": 1
+  }
+]

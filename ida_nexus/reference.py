@@ -4,8 +4,11 @@ import argparse
 import ast
 import importlib.metadata
 import importlib.util
+import math
 import re
+from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +226,16 @@ def _build_reference_spec() -> dict[str, Any]:
         "version": get_ida_domain_version(),
         "entries": entries,
         "examples": examples,
+        "entry_index": _ReferenceIndex.build(
+            [
+                entry
+                for entry in entries
+                if entry.get("visibility") == "public"
+                and "._docs." not in entry["qualname"]
+                and "._examples." not in entry["qualname"]
+            ]
+        ),
+        "example_index": _ReferenceIndex.build(examples),
     }
     return _REFERENCE_SPEC_CACHE
 
@@ -248,22 +261,73 @@ def _reference_tokens(query: str) -> list[str]:
     return [token for token in tokens if token not in stopwords]
 
 
-def _reference_score(item: dict[str, Any], query: str, tokens: list[str]) -> int:
-    item_name = str(item.get("name", "")).casefold()
-    name = " ".join(
-        str(item.get(field, "")).casefold() for field in ("name", "qualname", "title")
-    )
-    body = " ".join(str(item.get(field, "")).casefold() for field in ("doc", "content"))
-    score = 100 if query in name or query in body else 0
-    for token in tokens:
-        variants = {token, token.removesuffix("s")}
-        score += 12 * sum(variant in name for variant in variants if variant)
-        score += 2 * sum(variant in body for variant in variants if variant)
-        if item_name in variants:
-            score += 40
-    if score and "property" in item.get("decorators", []):
-        score += 20
-    return score
+@dataclass
+class _BM25Field:
+    """Cached BM25 statistics for one field, using k1=1.2 and b=0.75."""
+
+    frequencies: list[Counter[str]]
+    length_norms: list[float]
+    idf: dict[str, float]
+
+    @classmethod
+    def build(cls, texts: Sequence[str]) -> "_BM25Field":
+        frequencies = [Counter(_reference_tokens(text)) for text in texts]
+        document_frequency: Counter[str] = Counter()
+        for frequency in frequencies:
+            document_frequency.update(frequency.keys())
+        count = len(frequencies)
+        lengths = [sum(frequency.values()) for frequency in frequencies]
+        average_length = sum(lengths) / count if count else 0
+        return cls(
+            frequencies=frequencies,
+            length_norms=[
+                1.2 * (0.25 + 0.75 * length / average_length) if average_length else 1.2
+                for length in lengths
+            ],
+            idf={
+                term: math.log1p((count - frequency + 0.5) / (frequency + 0.5))
+                for term, frequency in document_frequency.items()
+            },
+        )
+
+    def score(self, document: int, terms: set[str]) -> float:
+        frequency = self.frequencies[document]
+        norm = self.length_norms[document]
+        return math.fsum(
+            self.idf[term] * frequency[term] * 2.2 / (frequency[term] + norm)
+            for term in terms
+            if frequency[term]
+        )
+
+
+@dataclass
+class _ReferenceIndex:
+    items: list[dict[str, Any]]
+    names: _BM25Field
+    docs: _BM25Field
+
+    @classmethod
+    def build(cls, items: list[dict[str, Any]]) -> "_ReferenceIndex":
+        return cls(
+            items=items,
+            names=_BM25Field.build(
+                [item.get("qualname", item["name"]) for item in items]
+            ),
+            docs=_BM25Field.build([item.get("doc", "") for item in items]),
+        )
+
+    def search(self, query: str) -> list[dict[str, Any]]:
+        terms = set(_reference_tokens(query))
+        matches = []
+        for index, item in enumerate(self.items):
+            name = item.get("qualname", item["name"])
+            # Weight symbol matches more strongly; each field has its own
+            # length normalization so long docstrings cannot dilute names.
+            score = 2 * self.names.score(index, terms) + self.docs.score(index, terms)
+            if score > 0:
+                matches.append((score, name, item))
+        matches.sort(key=lambda match: (-match[0], match[1]))
+        return [item for _, _, item in matches]
 
 
 def _format_reference_entry(entry: dict[str, Any]) -> str:
@@ -282,32 +346,8 @@ def reference(query: str) -> str:
         raise ValueError("reference query must not be empty")
 
     spec = _build_reference_spec()
-    normalized_query = query.casefold()
-    tokens = _reference_tokens(query) or [normalized_query]
-
-    entries = [
-        (_reference_score(entry, normalized_query, tokens), entry)
-        for entry in spec["entries"]
-        if entry.get("visibility") == "public"
-        and "._docs." not in entry["qualname"]
-        and "._examples." not in entry["qualname"]
-    ]
-    entries = [item for item in entries if item[0] > 0]
-    entries.sort(key=lambda item: (-item[0], item[1]["qualname"]))
-
-    examples = [
-        (
-            _reference_score(
-                {"name": example["name"], "doc": example["doc"]},
-                normalized_query,
-                tokens,
-            ),
-            example,
-        )
-        for example in spec["examples"]
-    ]
-    examples = [item for item in examples if item[0] > 0]
-    examples.sort(key=lambda item: (-item[0], item[1]["name"]))
+    entries = spec["entry_index"].search(query)
+    examples = spec["example_index"].search(query)
 
     sections = [
         f"IDA Domain API reference {spec['version']}",
@@ -317,7 +357,7 @@ def reference(query: str) -> str:
         sections.append(
             "API entries:\n\n"
             + "\n\n---\n\n".join(
-                _format_reference_entry(entry) for _, entry in entries[:20]
+                _format_reference_entry(entry) for entry in entries[:20]
             )
         )
     if examples:
@@ -326,7 +366,7 @@ def reference(query: str) -> str:
             + "\n\n---\n\n".join(
                 f"Example: {example['name']} ({example['path']})\n"
                 f"```python\n{example['content'].rstrip()}\n```"
-                for _, example in examples[:1]
+                for example in examples[:1]
             )
         )
     if not entries and not examples:
