@@ -578,21 +578,27 @@ def test_autoanalysis_completion_check_runs_on_ida_thread(
 @pytest.fixture
 def waiting_runtime(gui_runtime, monkeypatch):
     runtime, _, _ = gui_runtime
-    flags = SimpleNamespace(enabled=False, persistent=False, waits=0)
+    flags = SimpleNamespace(enabled=False, persistent=False, steps=0)
 
     def enable_auto(enabled):
         previous, flags.enabled = flags.enabled, enabled
         return previous
 
-    def auto_wait():
+    def auto_make_step(start, end):
+        assert (start, end) == (0, -1)
         assert flags.enabled
-        flags.waits += 1
-        return True
+        flags.steps += 1
+        return flags.steps % 3 != 0
+
+    def auto_wait():
+        pytest.fail("explicit waits must not enter the uninterruptible native drain")
 
     auto = sys.modules["ida_auto"]
     monkeypatch.setattr(auto, "enable_auto", enable_auto, raising=False)
     monkeypatch.setattr(auto, "auto_wait", auto_wait, raising=False)
+    monkeypatch.setattr(auto, "auto_make_step", auto_make_step, raising=False)
     monkeypatch.setattr(auto, "auto_is_ok", lambda: True, raising=False)
+    monkeypatch.setitem(sys.modules, "ida_idaapi", SimpleNamespace(BADADDR=-1))
     monkeypatch.setitem(
         sys.modules,
         "ida_ida",
@@ -615,27 +621,31 @@ def test_explicit_wait_enables_ongoing_analysis_even_after_completion(
         runtime.analysis_state.mark_complete(initial_status)
     assert runtime.wait_autoanalysis(1) == {"status": "complete", "complete": True}
     assert flags.enabled and flags.persistent
-    assert flags.waits == 1  # Even an already-complete barrier must synchronize.
+    assert flags.steps == 3  # Even an already-complete barrier must drain new work.
 
 
-@pytest.mark.parametrize("initial_status", ["disabled", "complete"])
+@pytest.mark.parametrize("initial_status", ["running", "disabled", "complete"])
 @pytest.mark.parametrize("initial_flags", [(False, False), (False, True), (True, True)])
-@pytest.mark.parametrize("failure", ["cancelled", "exception", "timeout"])
+@pytest.mark.parametrize("failure", ["cancelled", "exception", "timeout", "interrupt"])
 def test_failed_explicit_wait_restores_analysis_settings(
     waiting_runtime, initial_status, initial_flags, failure
 ):
     runtime, flags, auto = waiting_runtime
     flags.enabled, flags.persistent = initial_flags
-    runtime.analysis_state.mark_complete(initial_status)
+    if initial_status != "running":
+        runtime.analysis_state.mark_complete(initial_status)
 
-    def failed_wait():
+    def failed_step(_start, _end):
         if failure == "exception":
             raise ValueError("analysis failed")
+        if failure == "interrupt":
+            raise runtime_module._OperationInterrupt
         if failure == "timeout":
             time.sleep(0.15)
         return False
 
-    auto.auto_wait = failed_wait
+    auto.auto_make_step = failed_step
+    auto.auto_is_ok = lambda: False
     with pytest.raises(APIError) as error:
         runtime.wait_autoanalysis(0.02 if failure == "timeout" else 1)
     assert (
@@ -644,6 +654,7 @@ def test_failed_explicit_wait_restores_analysis_settings(
             "cancelled": "analysis_cancelled",
             "exception": "execution_failed",
             "timeout": "operation_timeout",
+            "interrupt": "operation_cancelled",
         }[failure]
     )
     assert (flags.enabled, flags.persistent) == initial_flags

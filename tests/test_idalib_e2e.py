@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -22,6 +23,7 @@ from ida_nexus import (
     DatabaseManager,
     DatabaseOpenOptions,
     DatabaseSelectionError,
+    NexusConnectionError,
     RemoteError,
     discover_databases,
     find_database_owner,
@@ -43,6 +45,44 @@ db.functions.get_name(func)
 @pytest.fixture
 def source(tmp_path: Path) -> Path:
     return Path(shutil.copyfile(SAMPLE, tmp_path / SAMPLE.name))
+
+
+@pytest.fixture
+def analysis_source(tmp_path: Path) -> Path:
+    """A compiler-independent ELF with enough real work to interrupt mid-drain."""
+    base, offset, stride = 0x400000, 0x1000, 32
+    code = bytearray()
+    for index in range(20_000):
+        # x86-64 frame, constant, call next function, increment, return. The
+        # entry point reaches every function; no symbols or Python IDB hooks
+        # are needed to drive analysis (hooks could mask a native GIL stall).
+        body = bytes.fromhex("55 48 89 e5 b8 2a 00 00 00")
+        if index + 1 < 20_000:
+            body += b"\xe8" + struct.pack("<i", stride - len(body) - 5)
+        body += bytes.fromhex("83 c0 01 5d c3")
+        code.extend(body.ljust(stride, b"\x90"))
+    size = offset + len(code)
+    header = struct.pack(
+        "<16sHHIQQQIHHHHHH",
+        b"\x7fELF\x02\x01\x01" + bytes(9),
+        2,
+        62,
+        1,
+        base + offset,
+        64,
+        0,
+        0,
+        64,
+        56,
+        1,
+        64,
+        0,
+        0,
+    )
+    segment = struct.pack("<IIQQQQQQ", 1, 5, 0, base, base, size, size, 0x1000)
+    path = tmp_path / "analysis.elf"
+    path.write_bytes((header + segment).ljust(offset, b"\x00") + code)
+    return path
 
 
 @pytest.fixture
@@ -474,6 +514,85 @@ def test_worker_crash_invalidates_handle_and_recovers_database(
         } == crashed_files
     else:
         assert backups == []
+
+
+@pytest.mark.parametrize("interrupt", ["cancel", "timeout"])
+def test_real_autoanalysis_interrupt_preserves_worker(
+    analysis_source, open_handle, interrupt
+):
+    handle = open_handle(analysis_source, auto_analysis=False)
+    assert handle.poll_autoanalysis()["complete"] is False
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        analysis = pool.submit(
+            handle.wait_autoanalysis,
+            timeout=0.25 if interrupt == "timeout" else None,
+            operation_id="interrupt-real-analysis",
+        )
+        if interrupt == "cancel":
+            # Let native analysis begin, rather than merely cancelling a queued
+            # RPC. The assertions below also require actual analysis progress.
+            time.sleep(0.25)
+            assert not analysis.done(), "fixture finished before cancellation"
+            assert handle.cancel_operation("interrupt-real-analysis")
+        with pytest.raises(RemoteError) as error:
+            analysis.result(timeout=3)
+        assert error.value.code == (
+            "operation_timeout" if interrupt == "timeout" else "operation_cancelled"
+        )
+    assert time.monotonic() - started < 3
+    assert handle.connected
+    state = handle.execute_python(
+        "import ida_auto, ida_ida, ida_funcs; "
+        "[ida_funcs.get_func_qty(), ida_auto.auto_is_ok(), "
+        "ida_auto.is_auto_enabled(), ida_ida.inf_is_auto_enabled()]"
+    )["result"]
+    assert 0 < state[0] <= 20_000, "must begin real analysis before interrupting"
+    assert state[1:] == [False, False, False]
+    assert handle.poll_autoanalysis()["complete"] is False
+    assert handle.execute_python("6 * 7")["result"] == 42
+
+    # A cancelled drain must not poison its successor, and resumption must
+    # analyze all functions rather than treating cancellation as completion.
+    assert handle.wait_autoanalysis(timeout=60)["complete"]
+    assert (
+        handle.execute_python("import ida_funcs; ida_funcs.get_func_qty()")["result"]
+        == 20_000
+    )
+    instance = handle.instance
+    handle.close(wait_for_database=True, timeout=3)
+    assert wait_database_released(instance, timeout=0)
+    assert probe_database_state(analysis_source)["state"] == "packed"
+
+
+def test_real_autoanalysis_last_close_cancels_and_saves(analysis_source, open_handle):
+    handle = open_handle(analysis_source, auto_analysis=False)
+    instance = handle.instance
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        analysis = pool.submit(handle.wait_autoanalysis)
+        time.sleep(0.25)
+        assert not analysis.done(), "fixture finished before lease release"
+        started = time.monotonic()
+        # Do not explicitly cancel: final lease release must cancel the orphan
+        # and save/close the IDB without waiting for analysis to finish.
+        handle.close(wait_for_database=True, timeout=3)
+        assert time.monotonic() - started < 3
+        assert wait_database_released(instance, timeout=0)
+        with pytest.raises((RemoteError, NexusConnectionError)) as error:
+            analysis.result(timeout=3)
+        if isinstance(error.value, RemoteError):
+            assert error.value.code == "operation_cancelled"
+
+    assert probe_database_state(analysis_source)["state"] == "packed"
+    reopened = open_handle(instance.idb_path, auto_analysis=False)
+    assert reopened.recovery == "none"
+    assert reopened.instance.record_id != instance.record_id
+    state = reopened.execute_python(
+        "import ida_auto, ida_funcs; [ida_funcs.get_func_qty(), ida_auto.auto_is_ok()]"
+    )["result"]
+    assert 0 < state[0] <= 20_000
+    assert state[1] is False, "shutdown must not drain pending analysis"
+    assert reopened.execute_python("6 * 7")["result"] == 42
 
 
 @pytest.mark.parametrize("code", ["while True: pass", "import time; time.sleep(1)"])
