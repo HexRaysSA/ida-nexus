@@ -7,6 +7,7 @@ import errno
 import os
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -18,6 +19,7 @@ _B_TREE_SIGNATURE_OFFSET = 19
 _B_TREE_SIGNATURE = b"B-tree v2"
 _B_TREE_HEADER_SIZE = _B_TREE_SIGNATURE_OFFSET + len(_B_TREE_SIGNATURE)
 _UNPACKED_SUFFIXES = (".id0", ".id1", ".id2", ".nam", ".til")
+_POSIX_PROBE_LOCK = threading.Lock()
 
 DatabaseFileStateName = Literal[
     "missing",
@@ -244,7 +246,12 @@ def _read_unlocked_header(
 ) -> tuple[bool | None, bytes | None, str | None]:
     if os.name == "nt":
         return _read_windows_header(path)
-    return _read_posix_header(path)
+    # flock locks belong to open file descriptions, not Python threads. An RPC
+    # failure and SSE disconnect can probe concurrently and mistake our own
+    # exclusive reader lock for a live IDA owner. Serialize local readers while
+    # retaining the nonblocking exclusive OS probe against external owners.
+    with _POSIX_PROBE_LOCK:
+        return _read_posix_header(path)
 
 
 def _backup_unpacked_database(state: DatabaseFileState) -> str:

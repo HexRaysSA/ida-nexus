@@ -180,7 +180,10 @@ discovery, and controlled interleavings. Their simulated backend cannot prove
 that IDA saves a valid database, honors cancellation, or repairs crash files.
 
 `test_database_state.py` covers malformed headers, partial component sets,
-recovery decisions, and backup behavior using constructed files. This is
+recovery decisions, and backup behavior using constructed files. Its concurrent
+POSIX probe test pauses one reader while it holds the real file lock and checks
+that another reader waits rather than misclassifying that lock as a live owner.
+Both shared and exclusive external locks must still report `in_use`. This is
 useful for deterministic error cases, but does not replace real IDA file tests.
 
 `test_idalib_e2e.py` exercises the public API against actual worker processes:

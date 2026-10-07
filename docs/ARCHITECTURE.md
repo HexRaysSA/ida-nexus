@@ -419,7 +419,10 @@ lock for the session lifetime. Nexus probes that lock before spawning over a
 database not represented in the registry. While holding the probe lock, it
 reads the B-tree `isTreeOpen` byte: a dirty unlocked `.id0` identifies crash
 leftovers; a locked `.id0` identifies a live IDA even when that process has no
-Nexus plugin.
+Nexus plugin. POSIX header probes are serialized within each client process so
+concurrent RPC-failure and SSE-disconnect probes cannot mistake each other's
+exclusive reader locks for a live owner. The OS lock attempt remains nonblocking;
+an external owner's lock is never bypassed.
 
 Recovery never reconnects an existing handle and never retries an ambiguous
 Python POST. The failed handle reports `DatabaseCrashedError` when the dirty
