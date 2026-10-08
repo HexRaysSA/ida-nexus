@@ -180,7 +180,10 @@ discovery, and controlled interleavings. Their simulated backend cannot prove
 that IDA saves a valid database, honors cancellation, or repairs crash files.
 
 `test_database_state.py` covers malformed headers, partial component sets,
-recovery decisions, and backup behavior using constructed files. This is
+recovery decisions, and backup behavior using constructed files. Its concurrent
+POSIX probe test pauses one reader while it holds the real file lock and checks
+that another reader waits rather than misclassifying that lock as a live owner.
+Both shared and exclusive external locks must still report `in_use`. This is
 useful for deterministic error cases, but does not replace real IDA file tests.
 
 `test_idalib_e2e.py` exercises the public API against actual worker processes:
@@ -198,6 +201,8 @@ useful for deterministic error cases, but does not replace real IDA file tests.
 | Worker death without a packed base | Flushed changes survive repair; a replacement worker creates a packed base; the failed handle remains unusable. |
 | Worker death with a packed base | Reopening restores saved contents; the dirty unpacked files are backed up byte-for-byte; the failed request is not replayed. |
 | Timeout and cancellation | Real Python loops terminate with the expected errors; the same worker executes subsequent requests successfully. |
+| Autoanalysis cancellation and timeout | A generated 20,000-function ELF exercises native IDA analysis without Python hooks or mocks. Explicit cancellation and a deadline interrupt the drain while queues remain pending, restore analysis settings, and leave the worker usable; a subsequent wait completes all functions. |
+| Final release during autoanalysis | Closing the last lease interrupts an in-flight drain, releases the worker promptly, and saves a clean IDB with pending analysis that reopens without recovery. |
 | User Python failure | Both ordinary exceptions and `SystemExit` return structured errors; the writer and peer remain usable; a prior rename survives save and reopen. |
 | Custom output and fresh replacement | Saved contents reopen at the chosen IDB path despite supplied import options; fresh creation is rejected while owned, then replaces the saved database from the input after release. |
 | Manager crash and recovery | A dead worker is classified as crashed, another database stays usable, explicit reopen recovers flushed changes, and the old manager ID cannot address the replacement. |
@@ -208,9 +213,13 @@ The shutdown race test wraps the real open only to hold that precise boundary.
 The other E2E tests do not mock Nexus, IDA, transport, or filesystem operations.
 File barriers coordinate processes; bounded polling waits for observable state.
 Worker death uses `os._exit()` to bypass cleanup without creating a native crash
-dialog. Inputs are temporary copies of the small bundled ELF; the test registry
-is isolated from personal Nexus sessions. These tests should run serially:
-the existing suite clears its shared test registry between tests.
+dialog. Inputs are temporary copies of the small bundled ELF or a generated
+x86-64 ELF with 20,000 reachable functions for analysis interruption tests; no
+compiler is required. Those tests allow analysis to start, then require an
+interrupt within three seconds and assert both actual function creation and
+undrained queues. The test registry is isolated from personal Nexus sessions.
+These tests should run serially: the existing suite clears its shared test
+registry between tests.
 
 ## Remaining limits
 

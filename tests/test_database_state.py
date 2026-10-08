@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -128,7 +130,8 @@ def test_probe_database_state_refuses_network_lock_results(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses POSIX flock")
-def test_probe_database_state_detects_a_live_lock(tmp_path: Path) -> None:
+@pytest.mark.parametrize("lock_mode", ["LOCK_EX", "LOCK_SH"])
+def test_probe_database_state_detects_a_live_lock(tmp_path: Path, lock_mode) -> None:
     import fcntl
 
     source = tmp_path / "sample.bin"
@@ -137,11 +140,57 @@ def test_probe_database_state_detects_a_live_lock(tmp_path: Path) -> None:
     write_id0(id0, dirty=True)
     fd = os.open(id0, os.O_RDONLY)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, getattr(fcntl, lock_mode) | fcntl.LOCK_NB)
         assert probe_database_state(source)["state"] == "in_use"
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses POSIX flock")
+@pytest.mark.parametrize("dirty", [False, True])
+def test_concurrent_probes_do_not_mistake_each_other_for_live_owner(
+    tmp_path, monkeypatch, dirty
+):
+    source = tmp_path / "sample.bin"
+    id0 = Path(expected_idb_path(source)).with_suffix(".id0")
+    write_id0(id0, dirty=dirty)
+    lock_held = threading.Event()
+    release_reader = threading.Event()
+    second_probing = threading.Event()
+    real_read = os.read
+    real_header = database_state._read_unlocked_header
+
+    def paused_read(fd, size):
+        if not lock_held.is_set():
+            # The first probe already owns the real kernel lock. Reproduce
+            # preemption here while the other disconnect thread probes too.
+            lock_held.set()
+            assert release_reader.wait(5), "test did not release the first probe"
+        return real_read(fd, size)
+
+    def observe_header(path):
+        if lock_held.is_set():
+            second_probing.set()
+        return real_header(path)
+
+    monkeypatch.setattr(database_state.os, "read", paused_read)
+    monkeypatch.setattr(database_state, "_read_unlocked_header", observe_header)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(probe_database_state, source)
+        try:
+            assert lock_held.wait(5)
+            second = pool.submit(probe_database_state, source)
+            assert second_probing.wait(5)
+            # It must wait for our reader, not return a false "in_use" result.
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.1)
+        finally:
+            release_reader.set()
+        expected = "crashed" if dirty else "unpacked"
+        assert first.result(timeout=5)["state"] == expected
+        assert second.result(timeout=5)["state"] == expected
+    assert probe_database_state(source)["state"] == expected
 
 
 def test_backup_preserves_crash_files_without_modifying_originals(

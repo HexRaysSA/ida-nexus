@@ -223,9 +223,14 @@ beyond loopback must provide their own transport security and authentication.
 `auto_make_step()` slices, releasing that serialization point between slices;
 this mirrors the GUI's idle-driven analysis and preserves the low-level API's
 ability to execute while initial analysis is still running. An explicit
-`wait_autoanalysis()` remains a blocking drain for adapters that need a
-completion barrier. The current ida-domain `Database` is available
-globally as `db`, alongside the imported `ida_domain` package. Ordinary
+`wait_autoanalysis()` remains a synchronous drain for adapters that need a
+completion barrier, but also uses `auto_make_step()` rather than native
+`auto_wait()`. It retains one operation generation and deadline for the entire
+drain, returning to Python between steps so the existing timeout/cancellation
+interrupt can unwind it. Cancellation must still wait for the current native
+step to return; unlike background slices, the explicit drain does not release
+operation serialization between steps. The current ida-domain `Database` is
+available globally as `db`, alongside the imported `ida_domain` package. Ordinary
 statements execute once, and a single or trailing expression becomes the
 result. As an alternative, code without a trailing
 expression may define `run(db)`, `execute(db)`, or `main(db)` for automatic
@@ -414,7 +419,10 @@ lock for the session lifetime. Nexus probes that lock before spawning over a
 database not represented in the registry. While holding the probe lock, it
 reads the B-tree `isTreeOpen` byte: a dirty unlocked `.id0` identifies crash
 leftovers; a locked `.id0` identifies a live IDA even when that process has no
-Nexus plugin.
+Nexus plugin. POSIX header probes are serialized within each client process so
+concurrent RPC-failure and SSE-disconnect probes cannot mistake each other's
+exclusive reader locks for a live owner. The OS lock attempt remains nonblocking;
+an external owner's lock is never bypassed.
 
 Recovery never reconnects an existing handle and never retries an ambiguous
 Python POST. The failed handle reports `DatabaseCrashedError` when the dirty

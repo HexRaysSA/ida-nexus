@@ -959,13 +959,20 @@ class IDARuntime:
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]:
         import ida_auto
         import ida_ida
+        import ida_idaapi
 
         def wait() -> bool:
             previously_persistent = ida_ida.inf_is_auto_enabled()
             previously_enabled = ida_auto.enable_auto(True)
             completed = False
             try:
-                if not ida_auto.auto_wait() or not ida_auto.auto_is_ok():
+                # Native auto_wait() does not return to Python until the entire
+                # queue drains, preventing our timeout/cancel interrupt from
+                # taking effect. Keep one operation/deadline, but return to
+                # Python between native steps so _OperationInterrupt can unwind.
+                while ida_auto.auto_make_step(0, ida_idaapi.BADADDR):
+                    pass
+                if not ida_auto.auto_is_ok():
                     return False
                 # An explicit successful wait opts into normal ongoing analysis,
                 # including when startup slices already completed the barrier.
