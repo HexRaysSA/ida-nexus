@@ -175,7 +175,9 @@ def _attribute_hints(error: BaseException) -> str | None:
         spec = None
     entries = _entries_by_qualname(spec)
     members = _public_members(obj)
-    ranked, confident = _ranked(obj, name, members)
+    # A dataclass field read off the class itself fails but is still listed;
+    # suggesting the name that just failed would only repeat the error.
+    ranked, confident = _ranked(obj, name, members - {name})
     lines = [
         f"  {_describe(obj, member, entries)}" for member in ranked[:_MAX_SUGGESTIONS]
     ]
@@ -249,10 +251,10 @@ def _is_mutator_for(obj: Any, typed: str, member: str) -> bool:
     """Whether ``member`` changes or builds something while ``typed`` only reads."""
 
     typed_words = _words(typed)
-    if typed_words[:1] and typed_words[0] in _MUTATOR_WORDS:
+    if typed_words and typed_words[0] in _MUTATOR_WORDS:
         return False
     member_words = _words(member)
-    if member_words[:1] and member_words[0] in _MUTATOR_WORDS:
+    if member_words and member_words[0] in _MUTATOR_WORDS:
         return True
     owner = _owner(obj)
     if not isinstance(owner, type):
@@ -397,13 +399,12 @@ def _score(
     if _differ_by_opposites(typed_words, candidate_words):
         # Also before dropping a leading "get": ``set_at`` is not ``get_at``.
         return 0.0, 0.0
+    candidate_variants = _optional_variants(candidate_words, frozenset(), frozenset())
     score = rank = 0.0
     for typed_variant, typed_drops in _optional_variants(
         typed_words, nouns, vocabulary
     ):
-        for candidate_variant, candidate_drops in _optional_variants(
-            candidate_words, frozenset(), frozenset()
-        ):
+        for candidate_variant, candidate_drops in candidate_variants:
             drops = typed_drops + candidate_drops
             # A lone word left after dropping the rest is too weak to also fuzz:
             # ``read_bytes`` would reach ``get_next_head`` via "read" ~ "head".
@@ -461,27 +462,28 @@ def _optional_variants(
     # ``func`` on Functions), so it is dropped outright. One they do use
     # carries meaning there (``byte`` on Bytes, ``decompile`` on Pseudocode)
     # and is only optional.
-    owner_only = nouns - vocabulary
-    if owner_only:
-        variants = [
-            (kept, drops + 1) if len(kept) < len(variant) else (variant, drops)
-            for variant, drops in variants
-            if (kept := [word for word in variant if word not in owner_only])
-            is not None
-        ]
+    if owner_only := nouns - vocabulary:
+        variants = [_dropping(owner_only, *variant) for variant in variants]
     if shared := nouns & vocabulary:
-        variants.extend(
-            (kept, drops + 1)
-            for variant, drops in list(variants)
-            if len(kept := [word for word in variant if word not in shared])
-            < len(variant)
-        )
+        for variant, drops in list(variants):
+            kept, kept_drops = _dropping(shared, variant, drops)
+            if kept_drops > drops:
+                variants.append((kept, kept_drops))
     # A bare "get" left over would match every getter equally.
     return [
         (variant, drops)
         for variant, drops in variants
         if variant and (not drops or variant != ["get"])
     ]
+
+
+def _dropping(
+    optional: frozenset[str], words: list[str], drops: int
+) -> tuple[list[str], int]:
+    """``words`` without the ``optional`` ones, counting one more drop if any went."""
+
+    kept = [word for word in words if word not in optional]
+    return (kept, drops + 1) if len(kept) < len(words) else (words, drops)
 
 
 def _overlap(
@@ -524,7 +526,6 @@ def _edit_distance(left: str, right: str) -> int:
             value = min(row[j] + 1, current[j - 1] + 1, row[j - 1] + cost)
             if (
                 previous_row is not None
-                and i > 1
                 and j > 1
                 and left_char == right[j - 2]
                 and left[i - 2] == right_char

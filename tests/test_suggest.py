@@ -299,6 +299,15 @@ def test_dataclass_listing_includes_its_properties() -> None:
     assert ", type: StringType" in formatted
 
 
+def test_field_read_off_its_class_is_not_suggested_back() -> None:
+    string_item = domain(".strings").StringItem
+    with pytest.raises(AttributeError) as raised:
+        _ = string_item.address
+    formatted = add_attribute_hints(raised.value, "")
+    assert "Did you mean" not in formatted
+    assert "StringItem fields: address: ea_t, " in formatted
+
+
 def test_manager_without_a_match_lists_its_members() -> None:
     formatted = failure("xrefs.zzz")
     assert "Did you mean" not in formatted
