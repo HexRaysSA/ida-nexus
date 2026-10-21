@@ -18,6 +18,7 @@ from typing import Any
 from weakref import WeakSet
 
 from ._registry import BackendName, _event_origin_id
+from ._suggest import add_attribute_hints
 from .models import DatabaseChangeEvent, PythonExecutionResult
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -315,7 +316,7 @@ def _format_user_traceback(error: BaseException, trace_filename: str) -> str | N
     return (
         "Traceback (most recent call last):\n"
         + "".join(traceback.format_list(frames[first_user_frame:]))
-        + "".join(traceback.format_exception_only(error))
+        + add_attribute_hints(error, "".join(traceback.format_exception_only(error)))
     )
 
 
