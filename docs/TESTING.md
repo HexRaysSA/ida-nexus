@@ -27,12 +27,14 @@ ida-nexus (or ida-mcp) plugin installed for IDA, and IDA's Python must import
 this checkout rather than a released ida-nexus:
 
 ```sh
-uv pip install -e . --python "<IDA's python.exe>"
+hcli ida python exec -- -m pip install -e .
 ```
 
-IDA's Python is the interpreter `idapyswitch` registered. An editable install
-reaches it through a `.pth` entry, which Python skips when the process starts
-inside this repository, so the e2e fixture runs IDA from a temporary directory.
+`hcli ida python doctor` shows which interpreter that is (the one
+`idapyswitch` registered, or the virtualenv `IDAPYTHON_VENV_EXECUTABLE`
+names). An editable install reaches it through a `.pth` entry, which Python
+skips when the process starts inside this repository, so the e2e fixture runs
+IDA from a temporary directory.
 
 `test_gui_open_starts_ida_and_other_clients_attach` carries the extra
 `gui_e2e` marker: it opens the IDA GUI on the desktop for a few seconds and
