@@ -576,10 +576,15 @@ def test_real_autoanalysis_interrupt_preserves_worker(
     state = handle.execute_python(
         "import ida_auto, ida_ida, ida_funcs; "
         "[ida_funcs.get_func_qty(), ida_auto.auto_is_ok(), "
-        "ida_auto.is_auto_enabled(), ida_ida.inf_is_auto_enabled()]"
+        "ida_auto.is_auto_enabled(), ida_ida.inf_is_auto_enabled(), "
+        "ida_auto.peek_auto_queue(0, ida_auto.AU_CODE) - ida_ida.inf_get_start_ea()]"
     )["result"]
-    assert 0 < state[0] <= 20_000, "must begin real analysis before interrupting"
-    assert state[1:] == [False, False, False]
+    # IDA marks code one instruction per step and creates functions only once
+    # the code queue has drained, so a slow machine shows progress as the code
+    # queue head having moved past the entry point rather than as functions.
+    assert state[0] < 20_000, "analysis must have been interrupted"
+    assert state[0] > 0 or state[4] > 0, "must begin real analysis before interrupting"
+    assert state[1:4] == [False, False, False]
     assert handle.poll_autoanalysis()["complete"] is False
     assert handle.execute_python("6 * 7")["result"] == 42
 
@@ -619,9 +624,14 @@ def test_real_autoanalysis_last_close_cancels_and_saves(analysis_source, open_ha
     assert reopened.recovery == "none"
     assert reopened.instance.record_id != instance.record_id
     state = reopened.execute_python(
-        "import ida_auto, ida_funcs; [ida_funcs.get_func_qty(), ida_auto.auto_is_ok()]"
+        "import ida_auto, ida_ida, ida_funcs; "
+        "[ida_funcs.get_func_qty(), ida_auto.auto_is_ok(), "
+        "ida_auto.peek_auto_queue(0, ida_auto.AU_CODE) - ida_ida.inf_get_start_ea()]"
     )["result"]
-    assert 0 < state[0] <= 20_000
+    # The saved database carries the interrupted analysis: either some functions
+    # or a code queue head that has moved past the entry point.
+    assert state[0] < 20_000
+    assert state[0] > 0 or state[2] > 0, "saved database must show partial analysis"
     assert state[1] is False, "shutdown must not drain pending analysis"
     assert reopened.execute_python("6 * 7")["result"] == 42
 
