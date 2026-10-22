@@ -261,8 +261,8 @@ ability to execute while initial analysis is still running. An explicit
 `wait_autoanalysis()` remains a synchronous drain for adapters that need a
 completion barrier, but also uses `auto_make_step()` rather than native
 `auto_wait()`. It retains one operation generation and deadline for the entire
-drain, returning to Python between steps so the existing timeout/cancellation
-interrupt can unwind it. Cancellation must still wait for the current native
+drain, checking cancellation cooperatively between steps so cleanup always
+restores the analyzer flags. Cancellation must still wait for the current native
 step to return; unlike background slices, the explicit drain does not release
 operation serialization between steps. The current ida-domain `Database` is
 available globally as `db`, alongside the imported `ida_domain` package. Ordinary
