@@ -218,6 +218,9 @@ class DatabaseInstance:
         payload = self._registry_payload()
         payload.pop("port")
         payload.pop("token")
+        if not self.host:
+            # Protocol 9 registrations predating host metadata omit this field.
+            payload.pop("host")
         return payload
 
     def _registry_payload(self) -> dict[str, Any]:

@@ -279,18 +279,18 @@ operation.
 
 ## Protocol contract and versioning
 
-`PROTOCOL_VERSION` is currently `8`. It is an exact compatibility version for
+`PROTOCOL_VERSION` is currently `9`. It is an exact compatibility version for
 the private discovery registry and per-database HTTP API. There is no downgrade
 or highest-common-version negotiation: a scanner whose local version differs
 from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
 deliberate—starting a replacement could corrupt an IDB already owned by a peer
 that the scanner does not understand.
 
-Protocol version 8 consists of the following interoperable contracts.
+The current protocol consists of the following interoperable contracts.
 
 ### Discovery contract
 
-A published `instances/<record-id>.json` record has these required fields:
+A published `instances/<record-id>.json` record has these fields:
 
 | Fields | Contract |
 |---|---|
@@ -303,16 +303,18 @@ A published `instances/<record-id>.json` record has these required fields:
 | `idb_key` | The 16-hex-digit identity described in **Database identity**. |
 | `managed` | Whether zero leases trigger worker shutdown. |
 | `started_at` | Unix start timestamp. |
-| `host` | Additive: `gui`, `idat`, or `idalib`; which IDA process serves the database. Older readers ignore it. |
+| `host` | Optional, additive: `gui`, `idat`, or `idalib`; which IDA process serves the database. Older readers ignore it. |
 
 The matching lifetime lock, atomic publication order, IDB identity algorithm,
 spawn-lock naming, and `READY`/`BLOCKED`/`DEAD` rules are part of this discovery
-contract. Readers require all fields above but ignore unknown additive fields.
+contract. Readers require the fields above except `host`, and ignore unknown
+additive fields.
 
 `GET /health` must return `status: "ok"` plus the record's `record_id`,
 `backend`, `pid`, `version`, `idb_path`, `idb_key`, `exe_path`, `managed`, and
-`started_at`. The port and token are not echoed. A client compares every known
-field but ignores unknown additive health fields.
+`started_at`. The port and token are not echoed. When the registry supplies
+`host`, health must match it too; records and health responses from older
+protocol-9 peers may omit it. Unknown additive health fields are ignored.
 
 ### Wire and lifecycle contract
 

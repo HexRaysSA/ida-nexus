@@ -4,6 +4,7 @@ import subprocess
 import threading
 import time
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -195,6 +196,81 @@ def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> Non
     assert scan_instances(tmp_path, timeout=0.01) == []
     assert not (tmp_path / f"{entry.record_id}.json").exists()
     registration.release()
+
+
+@pytest.mark.parametrize(
+    ("registry_host", "health_host", "wrong_pid", "expected_state"),
+    [
+        (None, None, False, InstanceState.READY),
+        ("idat", "idat", False, InstanceState.READY),
+        ("idat", "gui", False, InstanceState.BLOCKED),
+        ("idat", None, False, InstanceState.BLOCKED),
+        (None, None, True, InstanceState.BLOCKED),
+    ],
+)
+def test_scan_checks_old_and_host_aware_health_identity(
+    tmp_path: Path,
+    registry_host: str | None,
+    health_host: str | None,
+    wrong_pid: bool,
+    expected_state: InstanceState,
+) -> None:
+    payload: dict[str, Any] = {}
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            assert self.path == "/health"
+            assert self.headers["Authorization"] == "Bearer token"
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), HealthHandler)
+    registration = InstanceRegistration(
+        tmp_path,
+        InstanceIdentity("/tmp/old.i64", "/tmp/old", "idalib"),
+        token="token",
+    )
+    entry = registration.publish(server.server_port)
+    record = entry._registry_payload()
+    record.pop("host")
+    if registry_host is not None:
+        record["host"] = registry_host
+    (tmp_path / f"{entry.record_id}.json").write_text(json.dumps(record))
+    # Construct the old wire format independently of health_identity(): protocol
+    # 9 had all of these identity fields, but no host metadata.
+    payload.update(record)
+    payload.pop("port")
+    payload.pop("token")
+    payload.pop("host", None)
+    payload["status"] = "ok"
+    if health_host is not None:
+        payload["host"] = health_host
+    if wrong_pid:
+        payload["pid"] += 1
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        discovered = scan_instances(tmp_path)
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+        registration.release()
+
+    assert len(discovered) == 1
+    assert discovered[0].state is expected_state
+    assert discovered[0].instance.host == (registry_host or "")
+    if expected_state is InstanceState.BLOCKED:
+        assert discovered[0].detail == (
+            "health identity did not match the registry entry"
+        )
 
 
 def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
