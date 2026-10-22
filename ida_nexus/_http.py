@@ -16,6 +16,10 @@ from ._serialization import dumps_json
 if TYPE_CHECKING:
     from _typeshed import ReadableBuffer
 
+# Platform-specific: absent on Windows, where SIGPIPE does not exist.
+_MSG_NOSIGNAL: int = getattr(socket, "MSG_NOSIGNAL", 0)
+_SO_NOSIGPIPE: int | None = getattr(socket, "SO_NOSIGPIPE", None)
+
 HOST = "127.0.0.1"
 POST_BODY_LIMIT = 4 * 1024 * 1024
 MAX_CHUNK_LINE = 8192
@@ -64,7 +68,7 @@ class _NoSignalSocketWriter(BufferedIOBase):
         return True
 
     def write(self, data: "ReadableBuffer") -> int:
-        self._connection.sendall(data, socket.MSG_NOSIGNAL)
+        self._connection.sendall(data, _MSG_NOSIGNAL)
         with memoryview(data) as view:
             return view.nbytes
 
@@ -86,11 +90,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         # Embedded Python inherits IDA's signal disposition, not standalone
         # CPython's ignored SIGPIPE. Protect every write, including headers,
         # errors and streams, without altering the host's process-wide signals.
-        no_sigpipe = getattr(socket, "SO_NOSIGPIPE", None)
-        if no_sigpipe is not None:
-            self.request.setsockopt(socket.SOL_SOCKET, no_sigpipe, 1)
+        if _SO_NOSIGPIPE is not None:
+            self.request.setsockopt(socket.SOL_SOCKET, _SO_NOSIGPIPE, 1)
         super().setup()
-        if no_sigpipe is None and hasattr(socket, "MSG_NOSIGNAL"):
+        if _SO_NOSIGPIPE is None and _MSG_NOSIGNAL:
             self.wfile = _NoSignalSocketWriter(self.connection)
 
     def handle(self) -> None:
