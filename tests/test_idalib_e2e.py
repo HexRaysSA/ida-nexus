@@ -960,15 +960,21 @@ def test_gui_open_starts_ida_and_other_clients_attach(source, worker_host):
         assert not wait_database_released(instance, timeout=1), "GUI must stay open"
         attached = DatabaseHandle.open(str(source))
         try:
-            # qexit() tears down IDA's timers, so it must not run from one of
-            # them; Qt's event loop is the safe place, as for a user closing IDA.
+            # Queue shutdown outside Nexus's timer callback. Batch mode must be
+            # enabled inside the queued request, after remote execution restores it.
             attached.execute_python(
-                "import idc, ida_pro\n"
-                "from PySide6.QtCore import QTimer\n"
-                "idc.batch(1)\n"
-                "QTimer.singleShot(0, lambda: ida_pro.qexit(0))\n"
+                "import idc, ida_pro, ida_kernwin\n"
+                "def close_gui():\n"
+                "    idc.batch(1)\n"
+                "    ida_pro.qexit(0)\n"
+                "    return False\n"
+                "ida_kernwin.execute_ui_requests((close_gui,))\n"
                 "None"
             )
+        except NexusConnectionError:
+            # The queued exit may close HTTP before this request's reply arrives.
+            # Native close and persisted contents below are the success criteria.
+            pass
         finally:
             attached.close()
         assert wait_database_released(instance, timeout=60)

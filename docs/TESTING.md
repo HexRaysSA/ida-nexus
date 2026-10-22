@@ -45,8 +45,8 @@ native IDA, while preserving `IDAPYTHON_VENV_EXECUTABLE`.
 
 `test_gui_open_starts_ida_and_other_clients_attach` carries the extra
 `gui_e2e` marker: it opens the IDA GUI on the desktop for a few seconds and
-closes it again. Deselect it with `-m "not gui_e2e"` on a machine without a
-display.
+closes it again through IDA's own UI queue; PySide6 is not required. Deselect it
+with `-m "not gui_e2e"` on a machine without a display.
 
 ## Coverage and the code flashlight
 
