@@ -411,6 +411,17 @@ def test_explicit_wait_enables_analysis_and_persists_to_saved_database(
     assert reopened.returncode == 0, reopened.stdout + reopened.stderr
 
 
+def test_current_ea_roundtrip(source, open_handle):
+    handle = open_handle(source)
+    start = handle.execute_python("db.start_ip")["result"]
+    assert isinstance(start, int)
+    assert (
+        handle.execute_python("db.current_ea = db.start_ip\ndb.current_ea")["result"]
+        == start
+    )
+    assert handle.execute_python("db.current_ea")["result"] == start
+
+
 def test_deferred_analysis_namespaces_and_real_idb_events(source, open_handle):
     writer = open_handle(source, auto_analysis=False)
     observer = open_handle(source)

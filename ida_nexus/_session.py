@@ -9,6 +9,7 @@ again is the same everywhere and lives here.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import math
 import os
 import signal
@@ -95,8 +96,23 @@ def _print_log(message: str) -> None:
     print(f"[ida-nexus] {message}", file=sys.stderr, flush=True)
 
 
-class _IdaproUnavailable(types.ModuleType):
-    """Stands in for ``idapro`` inside IDA, where the library cannot load."""
+class _IdatLibrary(types.ModuleType):
+    """Expose non-lifecycle idalib operations from idat's already-loaded library."""
+
+    def __init__(self) -> None:
+        super().__init__("idapro")
+        import ida_diskio
+
+        library = {
+            "win32": "idalib.dll",
+            "darwin": "libidalib.dylib",
+        }.get(sys.platform, "libidalib.so")
+        self._library = ctypes.CDLL(ida_diskio.idadir(library))
+        self._library.set_screen_ea.argtypes = [ctypes.c_uint64]
+        self._library.set_screen_ea.restype = None
+
+    def set_screen_ea(self, ea: int) -> None:
+        self._library.set_screen_ea(ea)
 
     def __getattr__(self, name: str) -> Any:
         raise RuntimeError(
@@ -112,8 +128,8 @@ def _prepare_ida_domain() -> None:
     idat answers with True even though IDAPython is already running. It then
     imports ``idapro``, which refuses to load inside IDA. IDAPython leaves
     ``IDAPYTHON_VERSION`` in ``__main__`` (the signal idapro itself relies on),
-    so inside IDA a placeholder takes the import's place. Nothing in Nexus
-    calls into idapro there: IDA owns the database lifecycle.
+    so inside IDA a restricted binding takes the import's place without calling
+    ``init_library()``. IDA retains exclusive database lifecycle ownership.
     """
     if "idapro" in sys.modules:
         return
@@ -125,7 +141,7 @@ def _prepare_ida_domain() -> None:
     # The SWIG stub types the output parameters as ints; None is what works.
     kernwin: Any = ida_kernwin
     if kernwin.is_ida_library(None, 0, None):
-        sys.modules["idapro"] = _IdaproUnavailable("idapro")
+        sys.modules["idapro"] = _IdatLibrary()
 
 
 class NexusSession:
