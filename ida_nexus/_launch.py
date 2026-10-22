@@ -334,9 +334,15 @@ def ida_environment(base: Mapping[str, str]) -> dict[str, str]:
     plugins' packages live, so the client's venv must not leak in. An operator
     who wants IDA on a venv sets ``IDAPYTHON_VENV_EXECUTABLE``, IDA's documented
     way, which this leaves alone.
+
+    ``idalib`` also sets ``PYTHONHOME`` in the native environment to its
+    interpreter's home. A nested client inherits it even when the original
+    client's ``os.environ`` never saw the change. IDA must choose its own home,
+    or a different embedded Python version cannot import its standard library.
     """
     environment = dict(base)
     environment.pop("VIRTUAL_ENV", None)
+    environment.pop("PYTHONHOME", None)
     path = environment.get("PATH")
     if path:
         kept = [

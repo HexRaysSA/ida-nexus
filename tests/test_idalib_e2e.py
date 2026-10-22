@@ -843,14 +843,6 @@ def test_worker_runs_in_the_selected_host(source, open_handle, worker_host):
     handle = open_handle(source)
     assert handle.instance.backend == "idalib"
     assert handle.instance.host == worker_host
-    executable = handle.execute_python("import sys; sys.executable")["result"]
-    if worker_host == "idat":
-        assert Path(executable).stem == "idat"
-        # IDA's Python, not the one that started the client.
-        prefix = handle.execute_python("import sys; sys.prefix")["result"]
-        assert Path(prefix).resolve() != Path(sys.prefix).resolve()
-    else:
-        assert Path(executable).stem != "idat"
     listed = list_databases({"mine": handle.instance}, current="mine")["instances"]
     assert [item["host"] for item in listed if item["instance_id"] == "mine"] == [
         worker_host
@@ -880,17 +872,41 @@ def test_paths_with_spaces_reach_ida_unharmed(tmp_path, open_handle):
 
 
 def test_missing_nexus_in_idas_python_fails_with_an_update_hint(
-    source, tmp_path, monkeypatch, worker_host
+    source, tmp_path, monkeypatch, worker_host, open_handle
 ):
     """No fallback: a plugin whose ida-nexus is missing or too old is reported."""
     if worker_host != "idat":
         pytest.skip("only the idat host runs inside IDA's Python")
-    import venv
 
-    # IDA follows IDAPYTHON_VENV_EXECUTABLE (its documented binding) to a venv of
-    # the same Python version. This one has no ida-nexus at all.
+    # The client and embedded interpreters may have different minor versions.
+    # Query the running IDA rather than making a venv with pytest's Python.
+    handle = open_handle(source)
+    embedded = handle.execute_python(
+        "import os, sys; "
+        "{'base_prefix': sys.base_prefix, 'version': list(sys.version_info[:2]), "
+        "'windows': os.name == 'nt'}"
+    )["result"]
+    handle.close(wait_for_database=True, timeout=30)
+    base = Path(embedded["base_prefix"])
+    major, minor = embedded["version"]
+    interpreter = (
+        base / "python.exe"
+        if embedded["windows"]
+        else base / "bin" / f"python{major}.{minor}"
+    )
+    # IDA follows this documented binding; the matching venv has no ida-nexus.
     empty = tmp_path / "empty-venv"
-    venv.create(empty, with_pip=False, symlinks=False)
+    subprocess.run(
+        [str(interpreter), "-m", "venv", "--without-pip", "--copies", str(empty)],
+        # idalib mutates native PYTHONHOME without updating os.environ. Do not
+        # leak that hidden client-interpreter home into the different Python.
+        env=dict(os.environ),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
     python = next(empty.glob("Scripts/python.exe"), None) or empty / "bin" / "python"
     monkeypatch.setenv("IDAPYTHON_VENV_EXECUTABLE", str(python))
     with pytest.raises(WorkerStartError) as error:

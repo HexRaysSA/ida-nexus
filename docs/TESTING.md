@@ -36,6 +36,13 @@ names). An editable install reaches it through a `.pth` entry, which Python
 skips when the process starts inside this repository, so the e2e fixture runs
 IDA from a temporary directory.
 
+The client and IDA may use different Python minor versions. The missing-package
+scenario queries IDA's interpreter before creating its empty virtualenv.
+On macOS, an activated IDAPython venv can also make `sys.executable` name Python
+rather than `idat`; `instance.host` reports the host independently of that path.
+Nexus removes the client's `PYTHONHOME` and activated-venv settings when starting
+native IDA, while preserving `IDAPYTHON_VENV_EXECUTABLE`.
+
 `test_gui_open_starts_ida_and_other_clients_attach` carries the extra
 `gui_e2e` marker: it opens the IDA GUI on the desktop for a few seconds and
 closes it again. Deselect it with `-m "not gui_e2e"` on a machine without a

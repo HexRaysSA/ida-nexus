@@ -356,14 +356,17 @@ def test_ida_environment_drops_the_clients_virtualenv(tmp_path):
     plain.mkdir()
     base = {
         "VIRTUAL_ENV": str(venv),
+        "PYTHONHOME": "/client/python3.11",
         "PATH": os.pathsep.join([str(scripts), str(plain), ""]),
         "IDAPYTHON_VENV_EXECUTABLE": "/ida/venv/bin/python",
         "HOME": "/home/me",
     }
     environment = ida_environment(base)
     assert "VIRTUAL_ENV" not in environment
+    assert "PYTHONHOME" not in environment
     assert environment["PATH"] == os.pathsep.join([str(plain), ""])
     # IDA's own, documented venv binding is the operator's choice.
     assert environment["IDAPYTHON_VENV_EXECUTABLE"] == "/ida/venv/bin/python"
     assert environment["HOME"] == "/home/me"
     assert base["PATH"].startswith(str(scripts)), "the caller's mapping is untouched"
+    assert base["PYTHONHOME"] == "/client/python3.11"
