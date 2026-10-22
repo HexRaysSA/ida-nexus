@@ -27,6 +27,13 @@ class DatabaseOpenOptions:
     ``keepalive`` instead delays worker shutdown after the lease is released.
     ``image_base`` is a byte address and must be 16-byte aligned.
 
+    ``gui`` opens a new database in the IDA GUI instead of a headless worker.
+    It needs the ida-nexus plugin installed for IDA and is ignored when some
+    instance already owns the database. Headless workers run inside ``idat``
+    when that plugin is installed, so plugins see the packages installed for
+    IDA's Python; ``IDA_NEXUS_IDALIB_ONLY=1`` opts out of both and keeps every
+    worker in this interpreter's idalib.
+
     ``worker_env`` and ``worker_cwd`` configure the spawned process rather than
     the database it opens: without them the worker inherits the environment and
     working directory of whoever asked for the open. A caller that runs
@@ -43,6 +50,7 @@ class DatabaseOpenOptions:
     idle_timeout: float | None = None
     worker_env: Mapping[str, str] | None = None
     worker_cwd: str | Path | None = None
+    gui: bool = False
     auto_analysis: bool = True
     image_base: int | None = None
     new_database: bool = False
@@ -59,8 +67,6 @@ class DatabaseOpenOptions:
     db_compression: str | None = None
     run_debugger: str | None = None
     load_resources: bool = True
-    script_file: str | Path | None = None
-    script_args: tuple[str, ...] = ()
     file_type: str | None = None
     file_member: str | None = None
     empty_database: bool = False
@@ -113,8 +119,6 @@ class DatabaseOpenOptions:
             )
         if self.file_member and not self.file_type:
             raise ValueError("file_member requires file_type")
-        if self.script_args and not self.script_file:
-            raise ValueError("script_args require script_file")
         if isinstance(self.debug_flags, bool):
             raise TypeError("debug_flags must be an integer mask or flag names")
         if isinstance(self.debug_flags, int):
@@ -133,7 +137,6 @@ class DatabaseOpenOptions:
             "second_pass_directives",
             _string_tuple(self.second_pass_directives),
         )
-        object.__setattr__(self, "script_args", _string_tuple(self.script_args))
         if self.worker_env is not None:
             object.__setattr__(
                 self, "worker_env", MappingProxyType(dict(self.worker_env))

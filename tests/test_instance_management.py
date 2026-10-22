@@ -1,4 +1,3 @@
-import argparse
 import json
 import os
 import subprocess
@@ -27,6 +26,12 @@ from ida_nexus import (
     wait_database_released,
 )
 from ida_nexus._http import RequestHandler
+from ida_nexus._launch import (
+    WorkerLaunchOptions,
+    ida_switches,
+    join_ida_switches,
+    worker_command,
+)
 from ida_nexus._registry import (
     PROTOCOL_VERSION,
     REGISTRY_DIR,
@@ -42,14 +47,10 @@ from ida_nexus._registry import (
 from ida_nexus._resolver import resolve_instance
 from ida_nexus._runtime import AnalysisState, IdbChangeState
 from ida_nexus._server import NexusHTTPServer
+from ida_nexus.cli.worker import _parser as worker_parser
 from ida_nexus.cli.worker import (
-    _build_ida_options,
-    _image_base_to_paragraphs,
-    _parse_image_base,
+    _split_switches,
     _work_around_idapro_idausr_path_list,
-)
-from ida_nexus.cli.worker import (
-    _parser as worker_parser,
 )
 
 
@@ -379,8 +380,6 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
             db_compression="pack",
             run_debugger="linux",
             load_resources=True,
-            script_file="startup.py",
-            script_args=("arg",),
             file_type="ZIP",
             file_member="nested.bin",
             empty_database=True,
@@ -399,6 +398,7 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
         "output_database": "firmware.i64",
         "worker_env": {"PATH": "/bin"},
         "worker_cwd": "/srv/work",
+        "gui": False,
         "auto_analysis": True,
         "image_base": 0x8000,
         "new_database": True,
@@ -415,8 +415,6 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
         "db_compression": "pack",
         "run_debugger": "linux",
         "load_resources": True,
-        "script_file": "startup.py",
-        "script_args": ("arg",),
         "file_type": "ZIP",
         "file_member": "nested.bin",
         "empty_database": True,
@@ -438,7 +436,7 @@ def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
         expected_idb: str,
         lease_grace: float,
         options: resolver_mod.WorkerLaunchOptions,
-    ) -> tuple[subprocess.Popen[bytes], Path]:
+    ) -> resolver_mod.SpawnedWorker:
         captured.update(
             source=source_path,
             expected_idb=expected_idb,
@@ -458,7 +456,8 @@ def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
             SimpleNamespace(pid=os.getpid(), poll=lambda: None),
         )
         assert server.entry is not None
-        return process, tmp_path / f"{server.entry.record_id}.log"
+        suffix = server.entry.record_id.rsplit("-", 1)[-1]
+        return resolver_mod.SpawnedWorker(process, tmp_path / f"{suffix}.log", suffix)
 
     try:
         result = resolve_instance(
@@ -480,8 +479,6 @@ def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
             db_compression="no_pack",
             run_debugger="linux",
             load_resources=True,
-            script_file=tmp_path / "startup.py",
-            script_args="argument",
             file_type="ZIP",
             file_member="nested.bin",
             empty_database=True,
@@ -515,8 +512,6 @@ def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
         db_compression="no_pack",
         run_debugger="linux",
         load_resources=True,
-        script_file=str(tmp_path / "startup.py"),
-        script_args=("argument",),
         file_type="ZIP",
         file_member="nested.bin",
         empty_database=True,
@@ -732,6 +727,7 @@ def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) 
             {
                 "path": entry.idb_path,
                 "backend": "gui",
+                "host": "gui",
                 "status": "available",
                 "instance_id": None,
                 "error": None,
@@ -1143,20 +1139,24 @@ def test_worker_uses_primary_idausr_entry_for_idapro(
 
 
 def test_image_base_uses_byte_units_and_requires_paragraph_alignment() -> None:
-    assert _parse_image_base("0x8000") == 0x8000
-    assert _image_base_to_paragraphs(0x8000) == 0x800
-    assert _image_base_to_paragraphs(None) is None
-    parsed = worker_parser().parse_args(["input.bin", "--debug-mask", "0x80"])
-    assert _build_ida_options(parsed, lambda **kwargs: kwargs)["debug_flags"] == 0x80
-    for value in ("-1", "0x8001", "not-an-address"):
+    switches = ida_switches(
+        WorkerLaunchOptions(image_base=0x8000),
+        output_database=None,
+        defer_analysis=True,
+    )
+    assert "-b800" in switches
+    assert "-z80" in ida_switches(
+        WorkerLaunchOptions(debug_flags=0x80), output_database=None, defer_analysis=True
+    )
+    for value in (-1, 0x8001):
         try:
-            _parse_image_base(value)
-        except argparse.ArgumentTypeError:
+            WorkerLaunchOptions(image_base=value)
+        except ValueError:
             pass
         else:
             raise AssertionError(f"invalid image base accepted: {value}")
     try:
-        resolver_mod.WorkerLaunchOptions(image_base=0x8001)
+        DatabaseOpenOptions(image_base=0x8001)
     except ValueError as exc:
         assert "16-byte aligned" in str(exc)
     else:
@@ -1169,22 +1169,21 @@ def test_fresh_worker_opens_source_instead_of_existing_idb(tmp_path: Path) -> No
     source.write_bytes(b"binary")
     expected_idb.write_bytes(b"old idb")
 
-    command = resolver_mod._build_worker_command(
+    command = worker_command(
+        "ida-nexus",
         str(source),
         str(expected_idb),
         20.0,
-        resolver_mod.WorkerLaunchOptions(
-            image_base=0x8000,
-            new_database=True,
-        ),
-        launcher=["ida-nexus", "worker"],
+        WorkerLaunchOptions(image_base=0x8000, new_database=True),
         record_suffix="abcdef",
     )
 
     assert command[:3] == ["ida-nexus", "worker", str(source)]
-    assert command[command.index("--output-database") + 1] == str(expected_idb)
-    assert command[command.index("--image-base") + 1] == "0x8000"
-    assert "--new-database" in command
+    switches = command[command.index("--") + 1 :]
+    # -o names the database to create; -c lets IDA replace the old one.
+    assert f"-o{expected_idb}" in switches
+    assert "-c" in switches
+    assert "-b800" in switches
 
 
 def test_existing_idb_drops_source_import_options(tmp_path: Path) -> None:
@@ -1193,26 +1192,25 @@ def test_existing_idb_drops_source_import_options(tmp_path: Path) -> None:
     source.write_bytes(b"binary")
     expected_idb.write_bytes(b"database")
 
-    command = resolver_mod._build_worker_command(
+    command = worker_command(
+        "ida-nexus",
         str(source),
         str(expected_idb),
         7.5,
-        resolver_mod.WorkerLaunchOptions(
+        WorkerLaunchOptions(
             auto_analysis=True,
             image_base=0x8000,
             processor="arm",
             file_type="Raw",
         ),
-        launcher=["ida-nexus", "worker"],
         record_suffix="abcdef",
     )
 
     assert command[:3] == ["ida-nexus", "worker", str(expected_idb)]
     assert "--auto-analysis" in command
-    assert "--image-base" not in command
-    assert "--processor" not in command
-    assert "--file-type" not in command
-    assert "--load-resources" not in command
+    switches = command[command.index("--") + 1 :]
+    # Analysis is deferred until the server has published.
+    assert switches == ["-a"]
 
 
 def test_resources_load_by_default_for_new_databases(tmp_path: Path) -> None:
@@ -1220,33 +1218,33 @@ def test_resources_load_by_default_for_new_databases(tmp_path: Path) -> None:
     source.write_bytes(b"binary")
 
     assert DatabaseOpenOptions().load_resources is True
-    command = resolver_mod._build_worker_command(
+    command = worker_command(
+        "ida-nexus",
         str(source),
         str(tmp_path / "sample.exe.i64"),
         20.0,
-        resolver_mod.WorkerLaunchOptions(),
-        launcher=["ida-nexus", "worker"],
+        WorkerLaunchOptions(),
         record_suffix="abcdef",
     )
-    assert "--load-resources" in command
+    assert "-R" in command
 
 
 def test_opening_an_idb_directly_drops_source_import_options(tmp_path: Path) -> None:
     idb = tmp_path / "sample.exe.i64"
     idb.write_bytes(b"database")
 
-    command = resolver_mod._build_worker_command(
+    command = worker_command(
+        "ida-nexus",
         str(idb),
         str(idb),
         20.0,
-        resolver_mod.WorkerLaunchOptions(load_resources=True, processor="arm"),
-        launcher=["ida-nexus", "worker"],
+        WorkerLaunchOptions(load_resources=True, processor="arm"),
         record_suffix="abcdef",
     )
 
     assert command[:3] == ["ida-nexus", "worker", str(idb)]
-    assert "--load-resources" not in command
-    assert "--processor" not in command
+    assert "-R" not in command
+    assert "-parm" not in command
 
 
 def test_unpacked_database_drops_import_options_but_keeps_save(tmp_path: Path) -> None:
@@ -1254,20 +1252,18 @@ def test_unpacked_database_drops_import_options_but_keeps_save(tmp_path: Path) -
     source.write_bytes(b"binary")
     (tmp_path / "sample.exe.id0").write_bytes(b"unpacked")
 
-    command = resolver_mod._build_worker_command(
+    command = worker_command(
+        "ida-nexus",
         str(source),
         str(tmp_path / "sample.exe.i64"),
         20.0,
-        resolver_mod.WorkerLaunchOptions(
-            load_resources=True, processor="arm", save_after_open=True
-        ),
-        launcher=["ida-nexus", "worker"],
+        WorkerLaunchOptions(load_resources=True, processor="arm", save_after_open=True),
         record_suffix="abcdef",
     )
 
     assert command[:3] == ["ida-nexus", "worker", str(source)]
-    assert "--load-resources" not in command
-    assert "--processor" not in command
+    assert "-R" not in command
+    assert "-parm" not in command
     assert "--save-after-open" in command
 
 
@@ -1276,14 +1272,14 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
     expected_idb = tmp_path / "firmware.i64"
     source.write_bytes(b"binary")
     log_file = tmp_path / "ida kernel.log"
-    script_file = tmp_path / "startup.py"
     windows_dir = tmp_path / "windows"
 
-    command = resolver_mod._build_worker_command(
+    command = worker_command(
+        "ida-nexus",
         str(source),
         str(expected_idb),
         7.5,
-        resolver_mod.WorkerLaunchOptions(
+        WorkerLaunchOptions(
             auto_analysis=True,
             image_base=0x8000,
             new_database=True,
@@ -1300,8 +1296,6 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
             db_compression="compress",
             run_debugger="linux",
             load_resources=True,
-            script_file=str(script_file),
-            script_args=("--flag", "argument two"),
             file_type="ZIP",
             file_member="nested.bin",
             empty_database=True,
@@ -1309,69 +1303,58 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
             no_segmentation=True,
             debug_flags=("ldr", "debugger"),
         ),
-        launcher=["ida-nexus", "worker"],
         record_suffix="abcdef",
     )
 
-    assert command[:2] == ["ida-nexus", "worker"]
-    assert "--auto-analysis" in command
-    assert command[command.index("--image-base") + 1] == "0x8000"
-    assert "--new-database" in command
-    assert "--compiler=gcc:sysv" in command
-    assert "--first-pass-directive=FIRST=1" in command
-    assert "--first-pass-directive=FIRST=2" in command
-    assert "--second-pass-directive=SECOND=1" in command
-    assert "--disable-fpp" in command
-    assert command[command.index("--entry-point") + 1] == "0x8010"
-    assert "--no-jit-debugger" in command
-    assert command[command.index("--log-file") + 1] == str(log_file)
-    assert "--disable-mouse" in command
-    assert "--plugin-options=sample:option" in command
-    assert command[command.index("--processor") + 1] == "arm"
-    assert command[command.index("--db-compression") + 1] == "compress"
-    assert "--run-debugger=linux" in command
-    assert "--load-resources" in command
-    assert command[command.index("--script-file") + 1] == str(script_file)
-    assert "--script-arg=--flag" in command
-    assert "--script-arg=argument two" in command
-    assert command[command.index("--file-type") + 1] == "ZIP"
-    assert command[command.index("--file-member") + 1] == "nested.bin"
-    assert "--empty-database" in command
-    assert command[command.index("--windows-dir") + 1] == str(windows_dir)
-    assert "--no-segmentation" in command
-    assert "--debug-flag=ldr" in command
-    assert "--debug-flag=debugger" in command
-
-    parsed = worker_parser().parse_args(command[2:])
-    ida_options = _build_ida_options(parsed, lambda **kwargs: kwargs)
-    assert ida_options == {
+    assert command[:3] == ["ida-nexus", "worker", str(source)]
+    lifecycle = command[3 : command.index("--")]
+    assert lifecycle == [
+        "--record-suffix",
+        "abcdef",
+        "--lease-grace",
+        "7.5",
+        "--managed",
+        "--auto-analysis",
+    ]
+    switches = command[command.index("--") + 1 :]
+    assert switches == [
         # The worker publishes before starting analysis through Nexus.
-        "auto_analysis": False,
-        "loading_address": 0x800,
-        "new_database": True,
-        "compiler": "gcc:sysv",
-        "first_pass_directives": ["FIRST=1", "FIRST=2"],
-        "second_pass_directives": ["SECOND=1"],
-        "disable_fpp": True,
-        "entry_point": 0x8010,
-        "jit_debugger": False,
-        "log_file": str(log_file.resolve()),
-        "disable_mouse": True,
-        "plugin_options": "sample:option",
-        "output_database": str(expected_idb.resolve()),
-        "processor": "arm",
-        "db_compression": "compress",
-        "run_debugger": "linux",
-        "load_resources": True,
-        "script_file": str(script_file.resolve()),
-        "script_args": ["--flag", "argument two"],
-        "file_type": "ZIP",
-        "file_member": "nested.bin",
-        "empty_database": True,
-        "windows_dir": str(windows_dir.resolve()),
-        "no_segmentation": True,
-        "debug_flags": ["ldr", "debugger"],
-    }
+        "-a",
+        "-b800",
+        "-c",
+        "-Cgcc:sysv",
+        "-dFIRST=1",
+        "-dFIRST=2",
+        "-DSECOND=1",
+        "-f",
+        "-i8010",
+        "-I0",
+        f"-L{log_file}",
+        "-M",
+        f"-o{expected_idb}",
+        "-Osample:option",
+        "-parm",
+        "-P+",
+        "-rlinux",
+        "-R",
+        "-TZIP:nested.bin",
+        "-t",
+        f"-W{windows_dir}",
+        "-x",
+        "-z10010",
+    ]
+
+    # The worker hands the switches to idalib exactly as it received them; only
+    # tokens with spaces are quoted, the way ida-domain does it.
+    own_arguments, parsed_switches = _split_switches(command[2:])
+    parsed = worker_parser().parse_args(own_arguments)
+    assert parsed_switches == switches
+    assert parsed.managed is True
+    assert parsed.lease_grace == 7.5
+    joined = join_ida_switches(parsed_switches)
+    assert f'-L"{log_file}"' in joined
+    assert " -b800 " in joined
+    assert '"' not in joined.replace(f'-L"{log_file}"', "")
 
 
 def test_await_ready_accepts_console_launcher_child_pid(tmp_path: Path) -> None:
@@ -1389,9 +1372,8 @@ def test_await_ready_accepts_console_launcher_child_pid(tmp_path: Path) -> None:
     process = cast(subprocess.Popen[bytes], SimpleNamespace(pid=111, poll=lambda: None))
     try:
         result = resolver_mod._await_ready(
-            process,
+            resolver_mod.SpawnedWorker(process, tmp_path / "abcdef.log", "abcdef"),
             expected_idb,
-            tmp_path / "111-abcdef.log",
             time.monotonic() + 1,
         )
     finally:
@@ -2342,6 +2324,7 @@ def test_a_lease_the_scan_missed_is_still_listed(monkeypatch) -> None:
         {
             "path": "/w/target.i64",
             "backend": "idalib",
+            "host": "idalib",
             "status": "attached",
             "instance_id": "mine",
             "error": None,

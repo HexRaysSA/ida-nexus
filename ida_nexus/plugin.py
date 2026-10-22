@@ -10,23 +10,13 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 from typing import Any
 
 import ida_kernwin
-import ida_loader
-import ida_nalt
 import idaapi
 
-from ._registry import REGISTRY_DIR, InstanceIdentity, find_gui_owner
-from ._runtime import (
-    AnalysisState,
-    IDARuntime,
-    IdbChangeState,
-    create_autoanalysis_hook,
-    reconcile_autoanalysis_state,
-)
-from ._server import NexusHTTPServer
+from ._registry import find_gui_owner
+from ._session import NexusSession, current_database_paths
 
 
 class _ReadyToRunHook(ida_kernwin.UI_Hooks):
@@ -50,12 +40,8 @@ class _ReadyToRunHook(ida_kernwin.UI_Hooks):
 class _NexusPluginComponent:
     def __init__(self, *, owner: str) -> None:
         self.owner = owner
-        self.analysis_state: AnalysisState | None = None
-        self.idb_change_state: IdbChangeState | None = None
-        self._analysis_hook: Any = None
+        self.session: NexusSession | None = None
         self._ui_hook: _ReadyToRunHook | None = None
-        self._runtime: IDARuntime | None = None
-        self._server: NexusHTTPServer | None = None
         self._external_registration = False
 
     def log(self, message: str) -> None:
@@ -76,12 +62,16 @@ class _NexusPluginComponent:
             self.log("IDA 9.4 or newer is required")
             return False
 
-        self.analysis_state = AnalysisState()
-        self._analysis_hook = create_autoanalysis_hook(self.analysis_state)
-        self._analysis_hook.hook()
-        # The change hook is installed only while /idb_events has subscribers
-        # and only after initial autoanalysis has finished.
-        self.idb_change_state = IdbChangeState()
+        session = NexusSession(
+            backend="gui",
+            host="gui",
+            managed=False,
+            unattributed_operation_label="IDA GUI",
+            log=self.log,
+        )
+        # The GUI kernel is final once plugins load, so track analysis from here.
+        session.hook_analysis()
+        self.session = session
         # IDA's SWIG stubs model hook constructors with spurious arguments.
         hook_type: Any = _ReadyToRunHook
         ui_hook = hook_type(self)
@@ -89,29 +79,19 @@ class _NexusPluginComponent:
         self._ui_hook = ui_hook
         return True
 
-    @staticmethod
-    def _current_paths() -> tuple[str, str]:
-        idb_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB) or ""
-        exe_path = ida_nalt.get_input_file_path() or ""
-        return (
-            str(Path(idb_path).resolve()) if idb_path else "",
-            str(Path(exe_path).resolve()) if exe_path else "",
-        )
-
     def reconcile_autoanalysis(self) -> None:
-        analysis_state = self.analysis_state
-        if analysis_state is not None and not analysis_state.complete.is_set():
-            reconcile_autoanalysis_state(
-                analysis_state,
-                disabled_is_complete=True,
-            )
+        if self.session is not None:
+            self.session.reconcile_autoanalysis(disabled_is_complete=True)
 
     def start_server(self) -> None:
-        if self._server is not None or self._external_registration:
+        session = self.session
+        if session is None:
+            raise RuntimeError("IDA Nexus plugin component is not initialized")
+        if session.server is not None or self._external_registration:
             return
         self.reconcile_autoanalysis()
 
-        idb_path, exe_path = self._current_paths()
+        idb_path, _exe_path = current_database_paths()
 
         # Back off if an older or otherwise independent provider already
         # registered this GUI database. New providers importing this module are
@@ -121,49 +101,15 @@ class _NexusPluginComponent:
             self.log("Database already registered, skipping...")
             return
 
-        analysis_state = self.analysis_state
-        idb_change_state = self.idb_change_state
-        if analysis_state is None or idb_change_state is None:
-            raise RuntimeError("IDA Nexus plugin component is not initialized")
-
-        from ida_domain import Database
-
-        database = Database.open()
-        identity = InstanceIdentity(idb_path=idb_path, exe_path=exe_path, backend="gui")
-        runtime = IDARuntime(
-            backend="gui",
-            database=database,
-            analysis_state=analysis_state,
-            idb_change_state=idb_change_state,
-            unattributed_operation_label="IDA GUI",
-        )
-        server = NexusHTTPServer(
-            runtime,
-            identity,
-            analysis_state,
-            REGISTRY_DIR,
-        )
-        try:
-            server.start()
-        except Exception:
-            try:
-                database.unhook()
-            finally:
-                # start() may have acquired the lifetime lock before HTTP
-                # startup or publication failed. Release it only after the
-                # ida-domain database has detached from the GUI IDB.
-                server.release_registration()
-            raise
-        self._runtime = runtime
-        self._server = server
+        # The GUI runs analysis in its own event loop; nothing to drive here.
+        session.start(autoanalysis=False)
         self.log("Database registered successfully!")
 
     def run(self, *, caller: str) -> None:
         attribution = f" (initialized by {self.owner})" if caller != self.owner else ""
-        if self._server is not None:
-            message = (
-                f"Shared IDA Nexus server running at {self._server.url}{attribution}"
-            )
+        server = self.session.server if self.session is not None else None
+        if server is not None:
+            message = f"Shared IDA Nexus server running at {server.url}{attribution}"
         elif self._external_registration:
             message = f"IDA Nexus database registered by another provider{attribution}"
         else:
@@ -174,30 +120,12 @@ class _NexusPluginComponent:
         if self._ui_hook is not None:
             self._ui_hook.unhook()
             self._ui_hook = None
-        server = self._server
-        if server is not None:
-            server.stop()
-            self._server = None
-        if self._runtime is not None:
-            try:
-                # Ensure the lazily-installed hook is gone before teardown.
-                self._runtime.disable_idb_change_hook()
-            except Exception as exc:  # noqa: BLE001 -- best-effort SWIG cleanup
-                self.log(f"failed to remove idb-change hook: {exc}")
-            if self._runtime.database is not None:
-                try:
-                    self._runtime.database.unhook()
-                except Exception as exc:  # noqa: BLE001 -- best-effort SWIG cleanup
-                    self.log(f"failed to detach database: {exc}")
-            self._runtime = None
-        if server is not None:
-            # Release the lifetime lock only after detaching from the GUI IDB.
-            server.release_registration()
-        if self._analysis_hook is not None:
-            self._analysis_hook.unhook()
-            self._analysis_hook = None
-        self.analysis_state = None
-        self.idb_change_state = None
+        session = self.session
+        if session is not None:
+            # Detach from the GUI IDB first; the lifetime lock goes last.
+            session.stop()
+            session.release()
+            self.session = None
         self._external_registration = False
 
 

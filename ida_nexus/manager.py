@@ -52,8 +52,9 @@ def _entry_target_fields(entry: DatabaseInstance) -> dict[str, Any]:
         "exe_path": entry.exe_path,
         "managed": entry.managed,
         "started_at": entry.started_at,
+        "host": entry.host,
         "worker_log_path": (
-            str(LOG_DIR / f"{entry.record_id}.log")
+            str(LOG_DIR / f"{entry.record_id.rsplit('-', 1)[-1]}.log")
             if entry.backend == "idalib"
             else None
         ),

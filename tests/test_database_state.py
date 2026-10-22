@@ -14,6 +14,7 @@ from ida_nexus import (
     database_state,
     probe_database_state,
 )
+from ida_nexus._launch import worker_command
 from ida_nexus.database_state import (
     _B_TREE_DIRTY_OFFSET,
     _B_TREE_HEADER_SIZE,
@@ -218,33 +219,32 @@ def test_default_worker_open_never_uses_destructive_output_switch(
     source = str(tmp_path / "sample.bin")
     expected = expected_idb_path(source)
 
-    command = resolver._build_worker_command(
+    command = worker_command(
+        "ida-nexus",
         source,
         expected,
         20.0,
         resolver.WorkerLaunchOptions(),
-        launcher=["ida-nexus", "worker"],
         record_suffix="abcdef",
     )
 
-    assert "--output-database" not in command
+    assert not [switch for switch in command if switch.startswith("-o")]
 
 
 def test_custom_output_keeps_explicit_output_switch(tmp_path: Path) -> None:
     source = str(tmp_path / "sample.bin")
     expected = str(tmp_path / "custom" / "sample.i64")
 
-    command = resolver._build_worker_command(
+    command = worker_command(
+        "ida-nexus",
         source,
         expected,
         20.0,
         resolver.WorkerLaunchOptions(),
-        launcher=["ida-nexus", "worker"],
         record_suffix="abcdef",
     )
 
-    index = command.index("--output-database")
-    assert command[index + 1] == expected
+    assert f"-o{expected}" in command
 
 
 def test_resolver_refuses_unregistered_live_owner(

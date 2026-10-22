@@ -25,6 +25,9 @@ LOG_DIR = STATE_DIR / "logs"
 PROTOCOL_VERSION = 9
 DEFAULT_TIMEOUT = 1.0
 BackendName = Literal["gui", "idalib"]
+# Which IDA process serves the database. "idalib" and "idat" are both headless
+# idalib-backend workers; "gui" is the interactive IDA plugin.
+HostName = Literal["gui", "idalib", "idat"]
 
 
 def _event_origin_id(lease_id: str) -> str:
@@ -185,6 +188,7 @@ class InstanceIdentity:
     exe_path: str
     backend: BackendName
     managed: bool = False
+    host: HostName | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +212,7 @@ class DatabaseInstance:
     exe_path: str
     managed: bool
     started_at: float
+    host: str = ""
 
     def health_identity(self) -> dict[str, Any]:
         payload = self._registry_payload()
@@ -282,6 +287,7 @@ class InstanceRegistration:
             exe_path=exe_path,
             managed=self.identity.managed,
             started_at=time.time(),
+            host=self.identity.host or self.identity.backend,
         )
         target = self.directory / f"{self.record_id}.json"
         fd, temporary_name = tempfile.mkstemp(
@@ -404,8 +410,11 @@ def load_registry_entry(path: str | os.PathLike[str]) -> DatabaseInstance:
     # Protocol v1 readers ignore additive fields. This lets records gain
     # optional metadata without making older clients classify a live owner as
     # absent and potentially spawn over it.
+    host = payload.get("host", "")
+    if not isinstance(host, str):
+        raise TypeError("registry entry has an invalid host")
     values = {name: payload[name] for name in required if name != "token"}
-    return DatabaseInstance(_token=payload["token"], **values)
+    return DatabaseInstance(_token=payload["token"], host=host, **values)
 
 
 def _is_timeout(error: BaseException) -> bool:
