@@ -21,15 +21,19 @@ from ida_nexus import (
     DatabaseDisconnectedError,
     DatabaseHandle,
     DatabaseManager,
+    DatabaseOpenError,
     DatabaseOpenOptions,
     DatabaseSelectionError,
     NexusConnectionError,
     RemoteError,
+    WorkerStartError,
     discover_databases,
     find_database_owner,
+    list_databases,
     probe_database_state,
     wait_database_released,
 )
+from ida_nexus.paths import find_ida_executable, nexus_plugin_installed
 
 pytestmark = pytest.mark.idalib_e2e
 
@@ -40,6 +44,33 @@ func = next(iter(db.functions))
 assert db.functions.set_name(func, {name!r})
 db.functions.get_name(func)
 """
+
+
+@pytest.fixture(params=["idat", "idalib"], autouse=True)
+def worker_host(request, monkeypatch, tmp_path: Path) -> str:
+    """Run every scenario once per headless host.
+
+    ``idat`` is the default whenever the ida-nexus (or ida-mcp) plugin is
+    installed for IDA, so the installed plugin and IDA's Python must import
+    this checkout: ``uv pip install -e . --python <IDA's python>``. The idalib
+    host is the fallback and is forced through the operator opt-out.
+    """
+    if request.param == "idalib":
+        monkeypatch.setenv("IDA_NEXUS_IDALIB_ONLY", "1")
+    else:
+        monkeypatch.delenv("IDA_NEXUS_IDALIB_ONLY", raising=False)
+        if not nexus_plugin_installed() or find_ida_executable("idat") is None:
+            pytest.fail(
+                "the idat host needs the ida-nexus or ida-mcp plugin installed for "
+                "IDA and a configured IDA installation"
+            )
+    # An editable install reaches IDA's Python through a .pth entry naming this
+    # checkout. Python's site module skips that entry when the process already
+    # started in that directory, and IDAPython then drops the working directory
+    # from sys.path, so spawned IDA processes must not inherit the repository
+    # as their working directory.
+    monkeypatch.chdir(tmp_path)
+    return request.param
 
 
 @pytest.fixture
@@ -792,3 +823,136 @@ def test_shutdown_waits_for_in_flight_real_idalib_open(
     assert shutdown_errors == []
     assert worker_instances
     assert wait_database_released(worker_instances[0], timeout=10)
+
+
+# ---------------------------------------------------------------- hosts
+
+
+def test_worker_runs_in_the_selected_host(source, open_handle, worker_host):
+    """idat puts the worker in IDA's own Python; idalib keeps this interpreter's."""
+    handle = open_handle(source)
+    assert handle.instance.backend == "idalib"
+    assert handle.instance.host == worker_host
+    executable = handle.execute_python("import sys; sys.executable")["result"]
+    if worker_host == "idat":
+        assert Path(executable).stem == "idat"
+        # IDA's Python, not the one that started the client.
+        prefix = handle.execute_python("import sys; sys.prefix")["result"]
+        assert Path(prefix).resolve() != Path(sys.prefix).resolve()
+    else:
+        assert Path(executable).stem != "idat"
+    listed = list_databases({"mine": handle.instance}, current="mine")["instances"]
+    assert [item["host"] for item in listed if item["instance_id"] == "mine"] == [
+        worker_host
+    ]
+    assert handle.execute_python(READ_NAME)["result"]
+
+
+def test_paths_with_spaces_reach_ida_unharmed(tmp_path, open_handle):
+    """Every host quotes for IDA differently; none may mangle a spaced path."""
+    folder = tmp_path / "input with spaces"
+    folder.mkdir()
+    source = Path(shutil.copyfile(SAMPLE, folder / SAMPLE.name))
+    output = tmp_path / "output dir" / "custom name.i64"
+    output.parent.mkdir()
+    handle = open_handle(source, output_database=str(output))
+    assert Path(handle.instance.idb_path) == output.resolve()
+    assert handle.execute_python(RENAME.format(name="spaced_name"))["result"] == (
+        "spaced_name"
+    )
+    instance = handle.instance
+    handle.close(wait_for_database=True, timeout=30)
+    assert wait_database_released(instance, timeout=0)
+    assert output.is_file()
+    # The saved database reopens, again through the spaced paths.
+    reopened = open_handle(source, output_database=str(output))
+    assert reopened.execute_python(READ_NAME)["result"] == "spaced_name"
+
+
+def test_missing_nexus_in_idas_python_fails_with_an_update_hint(
+    source, tmp_path, monkeypatch, worker_host
+):
+    """No fallback: a plugin whose ida-nexus is missing or too old is reported."""
+    if worker_host != "idat":
+        pytest.skip("only the idat host runs inside IDA's Python")
+    import venv
+
+    # IDA follows IDAPYTHON_VENV_EXECUTABLE (its documented binding) to a venv of
+    # the same Python version. This one has no ida-nexus at all.
+    empty = tmp_path / "empty-venv"
+    venv.create(empty, with_pip=False, symlinks=False)
+    python = next(empty.glob("Scripts/python.exe"), None) or empty / "bin" / "python"
+    monkeypatch.setenv("IDAPYTHON_VENV_EXECUTABLE", str(python))
+    with pytest.raises(WorkerStartError) as error:
+        DatabaseHandle.open(
+            str(source), options=DatabaseOpenOptions(startup_timeout=60)
+        )
+    assert "missing or too old in IDA's Python" in str(error.value)
+    assert "hcli plugin update" in str(error.value)
+    assert probe_database_state(source)["state"] != "in_use"
+
+
+# ---------------------------------------------------------------- GUI
+
+
+@pytest.mark.gui_e2e
+def test_gui_open_starts_ida_and_other_clients_attach(source, worker_host):
+    """gui=True starts the IDA GUI, which the installed plugin registers.
+
+    The window stays open for the user: it is unmanaged, so closing the leases
+    leaves it running and the test shuts it down through IDA itself.
+    """
+    options = DatabaseOpenOptions(gui=True, startup_timeout=120)
+    if worker_host == "idalib":
+        with pytest.raises(DatabaseOpenError, match="IDA_NEXUS_IDALIB_ONLY"):
+            DatabaseHandle.open(str(source), options=options)
+        return
+
+    handle = DatabaseHandle.open(str(source), options=options)
+    instance = handle.instance
+    try:
+        assert instance.backend == "gui"
+        assert instance.host == "gui"
+        assert instance.managed is False
+        assert handle.execute_python("import ida_kernwin; ida_kernwin.is_idaq()")[
+            "result"
+        ]
+        # The bootstrap turns batch mode off again once IDA has run it, but the
+        # runtime switches batch mode on around every remote execution, so that
+        # cannot be observed from here; the bootstrap is covered by its own run.
+        assert handle.execute_python(RENAME.format(name="from_gui"))["result"] == (
+            "from_gui"
+        )
+        # Ordinary opens reuse the GUI instead of starting a worker.
+        other = DatabaseHandle.open(str(source))
+        try:
+            assert other.instance.record_id == instance.record_id
+            assert other.execute_python(READ_NAME)["result"] == "from_gui"
+        finally:
+            other.close()
+        handle.close()
+        assert not wait_database_released(instance, timeout=1), "GUI must stay open"
+        attached = DatabaseHandle.open(str(source))
+        try:
+            # qexit() tears down IDA's timers, so it must not run from one of
+            # them; Qt's event loop is the safe place, as for a user closing IDA.
+            attached.execute_python(
+                "import idc, ida_pro\n"
+                "from PySide6.QtCore import QTimer\n"
+                "idc.batch(1)\n"
+                "QTimer.singleShot(0, lambda: ida_pro.qexit(0))\n"
+                "None"
+            )
+        finally:
+            attached.close()
+        assert wait_database_released(instance, timeout=60)
+    finally:
+        if not wait_database_released(instance, timeout=0):
+            os.kill(instance.pid, 9)
+            wait_database_released(instance, timeout=30)
+    assert probe_database_state(source)["state"] == "packed"
+    reopened = DatabaseHandle.open(str(source))
+    try:
+        assert reopened.execute_python(READ_NAME)["result"] == "from_gui"
+    finally:
+        reopened.close(wait_for_database=True, timeout=30)

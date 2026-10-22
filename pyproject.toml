@@ -35,6 +35,7 @@ only-include = ["ida_nexus"]
 testpaths = ["tests"]
 markers = [
     "idalib_e2e: real IDA workers; requires installed IDA and configured idalib",
+    "gui_e2e: starts the IDA GUI; needs a display and the plugin installed for IDA",
 ]
 
 [tool.coverage.run]

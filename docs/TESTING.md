@@ -19,6 +19,26 @@ uv run pytest -m "not idalib_e2e"
 when IDA cannot start; they do not silently skip an installation problem.
 The old `IDA_NEXUS_RUN_IDALIB_E2E` opt-in is no longer needed.
 
+## Hosts
+
+Every real-IDA scenario runs twice: once with `idat` workers, once with idalib
+workers forced through `IDA_NEXUS_IDALIB_ONLY=1`. The `idat` runs need the
+ida-nexus (or ida-mcp) plugin installed for IDA, and IDA's Python must import
+this checkout rather than a released ida-nexus:
+
+```sh
+uv pip install -e . --python "<IDA's python.exe>"
+```
+
+IDA's Python is the interpreter `idapyswitch` registered. An editable install
+reaches it through a `.pth` entry, which Python skips when the process starts
+inside this repository, so the e2e fixture runs IDA from a temporary directory.
+
+`test_gui_open_starts_ida_and_other_clients_attach` carries the extra
+`gui_e2e` marker: it opens the IDA GUI on the desktop for a few seconds and
+closes it again. Deselect it with `-m "not gui_e2e"` on a machine without a
+display.
+
 ## Coverage and the code flashlight
 
 The report generators and recorder live in the separate

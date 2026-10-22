@@ -314,14 +314,38 @@ def join_ida_switches(switches: Sequence[str]) -> str:
 
 
 def script_switch(script: str | os.PathLike[str], arguments: Sequence[str]) -> str:
-    """``-S"script arg ..."`` with IDA's quoting; IDA exposes it as ``idc.ARGV``.
+    """One ``-S`` argv element: the script and its arguments, as ``idc.ARGV``.
 
-    The whole value is one quoted argv element, so quotes that group a path or
-    argument with spaces inside it are escaped once more.
+    IDA splits the text after ``-S`` on spaces itself and honours double
+    quotes, so only tokens containing spaces are quoted. The element as a whole
+    is quoted for the operating system by ``subprocess``.
     """
     parts = [quote_ida_argument(os.fspath(script))]
     parts.extend(quote_ida_argument(argument) for argument in arguments)
-    return '-S"' + " ".join(part.replace('"', '\\"') for part in parts) + '"'
+    return "-S" + " ".join(parts)
+
+
+def ida_environment(base: Mapping[str, str]) -> dict[str, str]:
+    """The environment for an ``ida`` or ``idat`` process we start.
+
+    IDAPython adopts a virtualenv it finds activated: ``VIRTUAL_ENV``, or a
+    venv interpreter first on ``PATH`` (``uv run`` and ``uvx`` arrange both for
+    the client). The whole point of these hosts is IDA's own Python, where the
+    plugins' packages live, so the client's venv must not leak in. An operator
+    who wants IDA on a venv sets ``IDAPYTHON_VENV_EXECUTABLE``, IDA's documented
+    way, which this leaves alone.
+    """
+    environment = dict(base)
+    environment.pop("VIRTUAL_ENV", None)
+    path = environment.get("PATH")
+    if path:
+        kept = [
+            entry
+            for entry in path.split(os.pathsep)
+            if not entry or not (Path(entry).parent / "pyvenv.cfg").is_file()
+        ]
+        environment["PATH"] = os.pathsep.join(kept)
+    return environment
 
 
 def worker_command(

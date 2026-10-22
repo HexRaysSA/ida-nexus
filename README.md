@@ -10,15 +10,23 @@ The goal is to enable an ecosystem where many tools can freely operate on a sing
 To achieve this, IDA Nexus exposes a compact Python execution surface with the
 [`ida-domain`](https://github.com/HexRaysSA/ida-domain) API available.
 
-## GUI
+## IDA plugin
 
-To support IDA GUI instances when using IDA Nexus, install the plugin:
+Install the plugin so IDA Nexus can share databases that are open in the IDA
+GUI, and so headless workers run in IDA's own Python:
 
 ```bash
 uvx ida-hcli plugin install https://github.com/HexRaysSA/ida-nexus
 ```
 
-_Note_: Without the GUI plugin, IDA Nexus will only work headlessly.
+With the plugin installed, a new headless worker is an `idat` process: IDA
+opens the database itself and plugins find the packages hcli installed for
+them. `DatabaseOpenOptions(gui=True)` opens a new database in the IDA GUI
+instead; that window belongs to the user and stays open when clients leave.
+
+Without the plugin, workers run through idalib in the client's own Python, so
+plugins that need packages installed for IDA cannot load there. Set
+`IDA_NEXUS_IDALIB_ONLY=1` to force that mode and never start `idat` or `ida`.
 
 ## MCP
 

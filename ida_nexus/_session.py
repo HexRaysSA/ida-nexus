@@ -14,6 +14,7 @@ import os
 import signal
 import sys
 import traceback
+import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,37 @@ def _print_log(message: str) -> None:
     print(f"[ida-nexus] {message}", file=sys.stderr, flush=True)
 
 
+class _IdaproUnavailable(types.ModuleType):
+    """Stands in for ``idapro`` inside IDA, where the library cannot load."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise RuntimeError(
+            f"idapro.{name} is unavailable inside IDA; this database is owned by "
+            "the IDA process, not by idalib"
+        )
+
+
+def _prepare_ida_domain() -> None:
+    """Let ida-domain import inside ``idat``.
+
+    ida-domain decides whether to load idalib with ``is_ida_library()``, which
+    idat answers with True even though IDAPython is already running. It then
+    imports ``idapro``, which refuses to load inside IDA. IDAPython leaves
+    ``IDAPYTHON_VERSION`` in ``__main__`` (the signal idapro itself relies on),
+    so inside IDA a placeholder takes the import's place. Nothing in Nexus
+    calls into idapro there: IDA owns the database lifecycle.
+    """
+    if "idapro" in sys.modules:
+        return
+    main = sys.modules.get("__main__")
+    if main is None or getattr(main, "IDAPYTHON_VERSION", None) is None:
+        return
+    import ida_kernwin
+
+    if ida_kernwin.is_ida_library(None, 0, None):
+        sys.modules["idapro"] = _IdaproUnavailable("idapro")
+
+
 class NexusSession:
     """One served database: runtime, HTTP server and registry record.
 
@@ -153,6 +185,7 @@ class NexusSession:
         """Attach to the open database, publish it, and optionally analyze it."""
         if self.server is not None:
             return self.server
+        _prepare_ida_domain()
         from ida_domain import Database
 
         self.hook_analysis()
@@ -312,11 +345,17 @@ def run_bootstrap(argv: list[str], *, interactive: bool) -> int | None:
     )
     args = parser.parse_args(argv)
     if interactive:
+        import ida_kernwin
         import idc
 
         # -A skipped the loader dialog and other prompts while loading; from here
-        # on the user owns the window and should see dialogs again.
-        idc.batch(0)
+        # on the user owns the window and should see dialogs again. IDA restores
+        # the batch flag when a -S script returns, so switch it off afterwards.
+        def interactive_again() -> int:
+            idc.batch(0)
+            return -1
+
+        ida_kernwin.register_timer(0, interactive_again)
         if args.save_after_open:
             save_current_database()
         return None

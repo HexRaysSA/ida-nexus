@@ -7,7 +7,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypedDict
 
-from ._launch import WorkerLaunchOptions, ida_command, select_host, worker_command
+from ._launch import (
+    WorkerLaunchOptions,
+    ida_command,
+    ida_environment,
+    select_host,
+    worker_command,
+)
 from ._registry import (
     DEFAULT_TIMEOUT,
     LOG_DIR,
@@ -171,15 +177,15 @@ def spawn_worker(
             record_suffix=suffix,
             log_path=log_path,
         )
+        environment = ida_environment(
+            options.worker_env if options.worker_env is not None else os.environ
+        )
         if host == "idat":
             # IDA's text UI runs without a terminal only when told so.
-            environment = dict(
-                options.worker_env if options.worker_env is not None else os.environ
-            )
             environment["TVHEADLESS"] = "1"
-            spawn_environment["env"] = environment
         else:
             hidden = False
+        spawn_environment["env"] = environment
 
     popen_options: dict[str, Any] = dict(spawn_environment)
     if os.name == "nt":

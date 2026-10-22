@@ -28,16 +28,19 @@ connection expresses one client's interest in an already-running database.
 |---|---|
 | `ida_nexus/plugin.py` | Idempotent, process-wide GUI plugin lifecycle. The first plugin entry point to call `init(owner=...)` owns lifecycle log attribution; all entry points share one service and call `term()` during IDA shutdown. |
 | `ida_nexus_plugin.py` | Standalone `plugin_t` entry point that delegates explicitly to `ida_nexus.plugin`. Other plugins can define their own `plugin_t` metadata and use the same lifecycle. |
-| `ida_nexus/cli/worker.py` | Opens an executable or IDB with idalib, starts the service, and closes/saves the database when its lifecycle ends. Resolver-spawned workers are managed; directly launched workers are unmanaged unless `--managed` is passed. |
+| `ida_nexus/_session.py` | One served database inside any IDA process: attaches to the database IDA has open, runs the runtime and HTTP service, and detaches again. Shared by the GUI plugin, the `idat` bootstrap, and the idalib worker. |
+| `ida_nexus/_launch.py` | Turns open options into IDA command-line switches, chooses the host executable (`idalib` worker, `idat`, or `ida`), and builds the commands and environment for each. |
+| `ida_nexus/_bootstrap/` | The `-S` script `idat` and `ida` run: it imports ida-nexus from IDA's Python, serves the database in `idat`, and hands the GUI window back to the user. |
+| `ida_nexus/cli/worker.py` | The idalib host: opens an executable or IDB through `idapro.open_database` with the switches it is given after `--`, serves it, and closes/saves it when its lifecycle ends. Resolver-spawned workers are managed; directly launched workers are unmanaged unless `--managed` is passed. |
 | `ida_nexus/_http.py` | Loopback HTTP/1.1 listener, bearer/host/browser checks, bounded framing and decompression, and streamed responses. |
 | `ida_nexus/_server.py` | Nexus routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
 | `ida_nexus/_registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
-| `ida_nexus/_resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
+| `ida_nexus/_resolver.py` | GUI discovery, expected-IDB resolution, serialized spawning of the chosen host, and startup diagnostics. |
 | `ida_nexus/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease and IDB-event streams, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
 | `ida_nexus/manager.py` | Protocol-agnostic database attachment, local selection and discovery, lease cleanup, and lifecycle events. |
 | `ida_nexus/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Nexus Python runtime. |
 | `ida_nexus/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in an adapter process. |
-| `ida_nexus/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
+| `ida_nexus/paths.py` | Resolves the shared state root, the IDA installation (`IDADIR` or `ida-config.json`), its `ida`/`idat` executables, and whether a plugin depending on ida-nexus is installed. |
 | `ida_nexus/cli/` | Implements the single `ida-nexus` entry point plus reference, execution, benchmark, and internal worker command adapters. |
 
 ## State layout
@@ -47,7 +50,7 @@ connection expresses one client's interest in an already-running database.
   instances/<record-id>.json       published instance metadata
   instances/<record-id>.lock       held for the instance lifetime
   spawn/<idb-key>.lock             serializes worker creation
-  logs/<record-id>.log             idalib worker stdout/stderr
+  logs/<suffix>.log                worker output (idalib stdout/stderr, or IDA's -L log)
   sessions/                         adapter-owned semantic sessions (IDA MCP)
 ```
 
@@ -140,11 +143,17 @@ disk permanently to avoid split-inode locking races.
 3. Otherwise find the unique owner of the expected IDB.
 4. Return a `READY` owner or report a lock-held `BLOCKED` owner.
 5. Acquire `spawn/<idb-key>.lock` and repeat the scan.
-6. If still absent, validate the source path and start the
-   `ida-nexus worker` as a hidden, detached managed worker.
-7. Wait for a record with the expected IDB key and launch identity. Normally the
-   PID is sufficient; on Windows the console launcher can hand off to a Python
-   child, so the random record suffix is authoritative across both processes.
+6. If still absent, validate the source path and start the host chosen by
+   `select_host`: `idat` when the ida-nexus (or ida-mcp) plugin is installed
+   for IDA, the `ida-nexus worker` console script of this interpreter
+   otherwise, or `ida` for `gui=True`. Headless hosts are hidden, detached
+   managed workers; the GUI is unmanaged. `IDA_NEXUS_IDALIB_ONLY=1` forces the
+   idalib worker and refuses the GUI. A missing executable or plugin is an
+   error, never a silent fallback.
+7. Wait for a record with the expected IDB key and launch identity. The random
+   record suffix passed to the worker is authoritative, because on Windows the
+   console launcher hands off to a Python child. The GUI plugin registers on
+   its own, so there the IDA process we started is the identity.
 8. By default, start initial autoanalysis asynchronously only after
    publication. idalib's native `run_auto_analysis=True` path blocks
    database opening, so Nexus opens with it deferred and advances bounded
@@ -153,14 +162,27 @@ disk permanently to avoid split-inode locking races.
    execute between slices. An adapter may still choose to wait on the
    completion barrier before model-authored execution.
 
-Public `DatabaseOpenOptions` exposes the complete `IdaCommandOptions` import
-surface to managed workers: analysis mode, image base, fresh/output database,
-compiler, first/second-pass directives, FPP handling, entry point, JIT setting,
-kernel log, mouse/plugin/processor options, database compression, debugger and
-resource settings, startup script and arguments, loader/member selection, empty
-database, Windows directory, segmentation, and debug flags. The worker requires
-a 16-byte-aligned byte image base and converts it transparently to IDA's
-paragraph-based `-b` value.
+Every host opens the database from the same IDA command-line switches, built
+once by `_launch.ida_switches`. `idat` and `ida` take them on their command
+line together with `-A`, `-L<log>` and the `-S` bootstrap; the idalib worker
+receives them after `--` and passes them to `idapro.open_database` unchanged.
+Public `DatabaseOpenOptions` exposes the import surface behind them: analysis
+mode, image base, fresh/output database, compiler, first/second-pass
+directives, FPP handling, entry point, JIT setting, kernel log, mouse/plugin/
+processor options, database compression, debugger and resource settings,
+loader/member selection, empty database, Windows directory, segmentation, and
+debug flags. Nexus owns IDA's `-S` switch, so there is no startup-script option;
+run startup Python through the handle. A byte image base must be 16-byte
+aligned and becomes IDA's paragraph-based `-b` value.
+
+The `idat` and `ida` hosts run in IDA's own Python, where hcli installs the
+packages plugins depend on. Their environment drops the client's virtualenv
+(`VIRTUAL_ENV` and venv directories on `PATH`), because IDAPython would adopt
+it otherwise; `IDAPYTHON_VENV_EXECUTABLE`, IDA's documented binding, is left
+alone. The bootstrap fails with an update hint when IDA's Python has no
+usable ida-nexus. In `idat` the session saves the database itself before
+releasing its registration and then lets IDA exit without writing again, so a
+client that reopens the IDB immediately finds a complete packed base.
 
 An explicit output database resolves by that IDB identity rather than attaching
 to a GUI that merely has the same executable open. A fresh-database request
@@ -268,6 +290,7 @@ A published `instances/<record-id>.json` record has these required fields:
 | `idb_key` | The 16-hex-digit identity described in **Database identity**. |
 | `managed` | Whether zero leases trigger worker shutdown. |
 | `started_at` | Unix start timestamp. |
+| `host` | Additive: `gui`, `idat`, or `idalib`; which IDA process serves the database. Older readers ignore it. |
 
 The matching lifetime lock, atomic publication order, IDB identity algorithm,
 spawn-lock naming, and `READY`/`BLOCKED`/`DEAD` rules are part of this discovery
