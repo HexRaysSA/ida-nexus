@@ -117,19 +117,32 @@ class _NexusPluginComponent:
         ida_kernwin.msg(f"[{caller}] {message}\n")
 
     def term(self) -> None:
+        global _pending_release
         if self._ui_hook is not None:
             self._ui_hook.unhook()
             self._ui_hook = None
         session = self.session
         if session is not None:
-            # Detach from the GUI IDB first; the lifetime lock goes last.
             session.stop()
-            session.release()
+            # qexit() unloads plugins before closing the native database. Defer
+            # release until normal UI dispatch resumes; on process exit the OS
+            # releases the retained lifetime lock instead.
+            _pending_release = session
+
+            def release_when_idle() -> bool:
+                global _pending_release
+                if _pending_release is session:
+                    _pending_release = None
+                session.release()
+                return False
+
+            ida_kernwin.execute_ui_requests((release_when_idle,))
             self.session = None
         self._external_registration = False
 
 
 _component: _NexusPluginComponent | None = None
+_pending_release: NexusSession | None = None
 
 
 def init(*, owner: str) -> bool:
@@ -139,11 +152,15 @@ def init(*, owner: str) -> bool:
     prefix. Later callers are no-ops and return ``True``.
     """
 
-    global _component
+    global _component, _pending_release
     if _component is not None:
         return True
     if not owner.strip():
         raise ValueError("owner must not be empty")
+    # A synchronous unload/reload can precede the queued release callback.
+    pending, _pending_release = _pending_release, None
+    if pending is not None:
+        pending.release()
 
     component = _NexusPluginComponent(owner=owner)
     try:

@@ -239,6 +239,15 @@ class NexusSession:
         server = self.server
         if server is not None:
             server.stop()
+        # IDAPython TESTABLE_BUILD requires user hooks to be gone before kernel
+        # or database teardown. In release builds this also avoids relying on
+        # IDAPython's forced stale-hook cleanup.
+        if self._analysis_hook is not None:
+            try:
+                self._analysis_hook.unhook()
+            except Exception as exc:  # noqa: BLE001 -- best-effort SWIG hook cleanup
+                self.log(f"failed to remove analysis hook: {exc}")
+            self._analysis_hook = None
         runtime = self.runtime
         if runtime is not None:
             try:
@@ -262,24 +271,15 @@ class NexusSession:
         self.server = None
         if server is not None:
             server.release_registration()
-        # IDAPython TESTABLE_BUILD requires user hooks to be gone before kernel
-        # or database teardown. In release builds this also avoids relying on
-        # IDAPython's forced stale-hook cleanup.
-        if self._analysis_hook is not None:
-            try:
-                self._analysis_hook.unhook()
-            except Exception as exc:  # noqa: BLE001 -- best-effort SWIG hook cleanup
-                self.log(f"failed to remove analysis hook: {exc}")
-            self._analysis_hook = None
 
 
 def serve_headless(args: argparse.Namespace) -> int:
     """Serve the database ``idat`` opened until the last lease or a signal ends it.
 
-    IDA closes the database when the process exits. The session saves first
-    (or marks the unpacked files for deletion when the shutdown asked to
-    discard) and only then releases its registration, so a client that reopens
-    the IDB right away finds the packed base complete.
+    IDA closes the database when the process exits. Save (or request discard)
+    here, but retain the registration's lifetime lock until that native teardown
+    finishes. Releasing it after packing alone would let clients reopen while
+    IDA still owns the unpacked database.
     """
     import ida_kernwin
     import ida_loader
@@ -330,7 +330,8 @@ def serve_headless(args: argparse.Namespace) -> int:
             ida_loader.set_database_flag(ida_loader.DBFL_KILL)
         except Exception as exc:  # noqa: BLE001 -- leave IDA's own save as the fallback
             print(f"[ida-nexus] failed to save database: {exc}", flush=True)
-        session.release()
+        # _registry._KEEP_ALIVE holds the lifetime lock until process exit.
+        # Discovery reaps the record after the OS releases that lock.
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
 

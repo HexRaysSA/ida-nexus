@@ -111,8 +111,14 @@ The watchdog marks the service as draining, closes lease streams and the
 listener, and asks the idalib main loop to stop. The registry record and its
 lifetime lock remain together while the worker saves/closes the IDB, so a
 scanner classifies the stopped owner as `BLOCKED` rather than spawning over it.
-Only after the IDB closes does the worker withdraw the record and release the
-lock. A plugin unload or process signal follows the same ownership ordering.
+The idalib host withdraws its record only after closing the IDB. The `idat`
+host keeps its lifetime lock through process exit: packing the database does
+not release IDA's native unpacked-file lock. Discovery reaps the dead record
+after the OS releases ownership. All database hooks detach before native close.
+GUI plugin teardown defers registration release to the UI queue. Normal plugin
+unloads release it when dispatch resumes; process exit retains it through native
+database close. A synchronous plugin reload releases the previous registration
+before publishing its replacement.
 
 The JSON file is discovery metadata; the kernel lock is the liveness authority.
 Conceptually, a scanner classifies a parseable record as:
