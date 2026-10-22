@@ -211,6 +211,13 @@ token from the private registry record, validates `Host`, and rejects
 browser-originated requests. Request framing and content encoding are strict,
 and both encoded and decompressed body sizes are bounded.
 
+Native IDA does not necessarily ignore `SIGPIPE` as standalone CPython does.
+Responses suppress it at the socket boundary (`SO_NOSIGPIPE` on macOS,
+`MSG_NOSIGNAL` on platforms providing that flag), covering headers and streams
+as well as bodies. A disconnected client raises a normal socket error rather
+than terminating IDA and losing unsaved changes. Nexus leaves the host's
+process-wide signal disposition unchanged.
+
 Important routes are:
 
 | Route | Purpose |

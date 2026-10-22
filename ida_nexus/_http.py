@@ -8,9 +8,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BufferedIOBase
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from ._serialization import dumps_json
+
+if TYPE_CHECKING:
+    from _typeshed import ReadableBuffer
 
 HOST = "127.0.0.1"
 POST_BODY_LIMIT = 4 * 1024 * 1024
@@ -49,6 +53,25 @@ def json_response(
     )
 
 
+class _NoSignalSocketWriter(BufferedIOBase):
+    """Unbuffered, full writes without changing the host's SIGPIPE handler."""
+
+    def __init__(self, connection: socket.socket) -> None:
+        super().__init__()
+        self._connection = connection
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: "ReadableBuffer") -> int:
+        self._connection.sendall(data, socket.MSG_NOSIGNAL)
+        with memoryview(data) as view:
+            return view.nbytes
+
+    def fileno(self) -> int:
+        return self._connection.fileno()
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     """Authenticated HTTP/1.1 handler with bounded request decoding."""
 
@@ -58,6 +81,17 @@ class RequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 30
     disable_nagle_algorithm = True
+
+    def setup(self) -> None:
+        # Embedded Python inherits IDA's signal disposition, not standalone
+        # CPython's ignored SIGPIPE. Protect every write, including headers,
+        # errors and streams, without altering the host's process-wide signals.
+        no_sigpipe = getattr(socket, "SO_NOSIGPIPE", None)
+        if no_sigpipe is not None:
+            self.request.setsockopt(socket.SOL_SOCKET, no_sigpipe, 1)
+        super().setup()
+        if no_sigpipe is None and hasattr(socket, "MSG_NOSIGNAL"):
+            self.wfile = _NoSignalSocketWriter(self.connection)
 
     def handle(self) -> None:
         try:
