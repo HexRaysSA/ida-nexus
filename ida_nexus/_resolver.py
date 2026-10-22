@@ -167,6 +167,9 @@ def spawn_worker(
     else:
         if options.log_file:
             log_path = Path(options.log_file)
+            if not log_path.is_absolute():
+                log_path = Path(options.worker_cwd or os.getcwd()) / log_path
+            log_path = log_path.absolute()
         command = ida_command(
             executable,
             host,

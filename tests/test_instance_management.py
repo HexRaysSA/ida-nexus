@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -53,6 +54,7 @@ from ida_nexus.cli.worker import (
     _split_switches,
     _work_around_idapro_idausr_path_list,
 )
+from ida_nexus.errors import WorkerStartError
 
 
 class StaticBackend:
@@ -1431,6 +1433,67 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
     assert f'-L"{log_file}"' in joined
     assert " -b800 " in joined
     assert '"' not in joined.replace(f'-L"{log_file}"', "")
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="fake native executable uses a POSIX shebang"
+)
+@pytest.mark.parametrize("existing_database", [False, True])
+@pytest.mark.parametrize("relative_cwd", [False, True])
+def test_native_startup_failure_reads_child_cwd_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_database: bool,
+    relative_cwd: bool,
+) -> None:
+    child_cwd = tmp_path / "child"
+    child_cwd.mkdir()
+    parent_log = tmp_path / "native.log"
+    parent_log.write_text("unrelated parent log")
+    executable = tmp_path / "idat"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "log = next(arg[2:] for arg in sys.argv[1:] if arg.startswith('-L'))\n"
+        "Path(log).write_text('native child failed while opening database')\n"
+        "sys.exit(7)\n"
+    )
+    executable.chmod(0o700)
+    source = tmp_path / "sample"
+    source.write_bytes(b"binary")
+    expected_idb = tmp_path / "sample.i64"
+    if existing_database:
+        expected_idb.write_bytes(b"database")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(resolver_mod, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(
+        resolver_mod, "select_host", lambda **kwargs: ("idat", str(executable))
+    )
+
+    spawned = resolver_mod.spawn_worker(
+        str(source),
+        str(expected_idb),
+        1.0,
+        WorkerLaunchOptions(
+            log_file="native.log",
+            worker_cwd="child" if relative_cwd else str(child_cwd),
+        ),
+    )
+    try:
+        assert spawned.process.wait(timeout=10) == 7
+        with pytest.raises(WorkerStartError) as error:
+            resolver_mod._await_ready(spawned, str(expected_idb), time.monotonic() + 5)
+    finally:
+        if spawned.process.poll() is None:
+            spawned.process.kill()
+            spawned.process.wait(timeout=10)
+
+    assert spawned.log_path == child_cwd / "native.log"
+    assert "exited with status 7" in str(error.value)
+    assert "native child failed while opening database" in str(error.value)
+    assert "unrelated parent log" not in str(error.value)
+    assert parent_log.read_text() == "unrelated parent log"
 
 
 def test_await_ready_accepts_console_launcher_child_pid(tmp_path: Path) -> None:
