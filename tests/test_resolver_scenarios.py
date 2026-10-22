@@ -186,7 +186,9 @@ def test_launcher_failure_reports_child_log_and_allows_retry(source, tmp_path):
     def failed_spawn(*_args):
         calls.append(True)
         return resolver.SpawnedWorker(
-            SimpleNamespace(pid=123, poll=lambda: 7), log, "abcdef"
+            Mock(spec=subprocess.Popen, pid=123, poll=Mock(return_value=7)),
+            log,
+            "abcdef",
         )
 
     for _ in range(2):
