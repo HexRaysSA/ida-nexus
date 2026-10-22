@@ -17,7 +17,9 @@ from ida_nexus._registry import (
 def published(tmp_path):
     registration = InstanceRegistration(
         tmp_path / "registry",
-        InstanceIdentity(str(tmp_path / "db.i64"), "", "idalib", managed=True),
+        InstanceIdentity(
+            str(tmp_path / "db.i64"), "", "idalib", host="idalib", managed=True
+        ),
         token="test-token",
     )
     try:
@@ -60,6 +62,9 @@ def test_withdraw_never_deletes_unauthenticated_record(published, payload):
     [
         ("record_id", "wrong"),
         ("backend", "other"),
+        ("host", "gui"),
+        ("host", ""),
+        ("host", None),
         ("pid", True),
         ("pid", 0),
         ("port", 0),
@@ -93,7 +98,7 @@ def test_failed_publication_leaves_no_partial_record_and_can_retry(
 ):
     registration = InstanceRegistration(
         tmp_path / "registry",
-        InstanceIdentity(str(tmp_path / "db.i64"), "", "idalib"),
+        InstanceIdentity(str(tmp_path / "db.i64"), "", "idalib", host="idalib"),
         token="test-token",
     )
     try:

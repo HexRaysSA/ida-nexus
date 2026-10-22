@@ -263,6 +263,7 @@ def make_server(tmp_path: Path, *, gui: bool = False):
         idb_path="/tmp/test.i64",
         exe_path="/tmp/test.exe",
         backend="gui" if gui else "idalib",
+        host="gui" if gui else "idalib",
     )
     server = NexusHTTPServer(
         backend,
@@ -316,7 +317,7 @@ def test_background_autoanalysis_prioritizes_operations_without_reserving_ids(
     backend = SlicedBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"),
         analysis,
         tmp_path,
         token="test-token",
@@ -395,7 +396,7 @@ def test_explicit_wait_takes_over_from_sliced_autoanalysis(tmp_path: Path):
     backend = TakeoverBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"),
         analysis,
         tmp_path,
         token="test-token",
@@ -446,7 +447,7 @@ def test_stop_prevents_waiting_autoanalysis_slice_from_starting(tmp_path: Path):
     backend = RecordingBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"),
         analysis,
         tmp_path,
         token="test-token",
@@ -496,7 +497,7 @@ def test_autoanalysis_requires_published_server(tmp_path: Path):
     analysis = AnalysisState()
     server = NexusHTTPServer(
         RecordingBackend(analysis),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"),
         analysis,
         tmp_path,
     )
@@ -551,7 +552,9 @@ def test_server_stop_closes_idle_keep_alive_connection(tmp_path: Path):
 
 def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
     analysis = AnalysisState()
-    identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
+    identity = InstanceIdentity(
+        "/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"
+    )
     parameter_sets: tuple[tuple[str, float, float], ...] = (
         ("lease_grace", float("nan"), 1.0),
         ("lease_grace", float("inf"), 1.0),
@@ -948,6 +951,7 @@ def test_managed_lease_expires_after_its_idle_timeout(tmp_path: Path):
             "/tmp/test.i64",
             "/tmp/test.exe",
             "idalib",
+            host="idalib",
             managed=True,
         ),
         analysis,
@@ -992,6 +996,7 @@ def test_active_request_suspends_lease_idle_expiration(tmp_path: Path):
             "/tmp/test.i64",
             "/tmp/test.exe",
             "idalib",
+            host="idalib",
             managed=True,
         ),
         analysis,
@@ -1029,6 +1034,7 @@ def test_indefinite_lease_keeps_worker_after_timed_lease_expires(
             "/tmp/test.i64",
             "/tmp/test.exe",
             "idalib",
+            host="idalib",
             managed=True,
         ),
         analysis,
@@ -1205,7 +1211,9 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
 
     analysis = AnalysisState()
     backend = SessionBackend(analysis)
-    identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
+    identity = InstanceIdentity(
+        "/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"
+    )
     server = NexusHTTPServer(
         backend,
         identity,
@@ -1272,7 +1280,9 @@ def test_disconnected_sse_skips_startup_grace(tmp_path: Path):
     backend = RecordingBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", managed=True),
+        InstanceIdentity(
+            "/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib", managed=True
+        ),
         analysis,
         tmp_path,
         lease_grace=30,

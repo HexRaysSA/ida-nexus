@@ -22,6 +22,7 @@ from ida_nexus import (
 from ida_nexus._registry import (
     REGISTRY_DIR,
     SPAWN_DIR,
+    BackendName,
     DiscoveredDatabase,
     FileLock,
     InstanceIdentity,
@@ -45,7 +46,7 @@ def records(source):
 
         def create(
             *,
-            backend="idalib",
+            backend: BackendName = "idalib",
             state=InstanceState.READY,
             path=None,
             record_suffix=None,
@@ -53,7 +54,10 @@ def records(source):
             registration = InstanceRegistration(
                 REGISTRY_DIR,
                 InstanceIdentity(
-                    str(path or expected_idb_path(source)), str(source), backend
+                    str(path or expected_idb_path(source)),
+                    str(source),
+                    backend,
+                    host=backend,
                 ),
                 token="test-token",
                 record_suffix=record_suffix,
