@@ -209,6 +209,7 @@ class NexusSession:
         self.hook_analysis()
         idb_path, exe_path = current_database_paths()
         database = Database.open()
+        self.reconcile_autoanalysis(disabled_is_complete=self.backend == "gui")
         identity = InstanceIdentity(
             idb_path=idb_path,
             exe_path=exe_path,

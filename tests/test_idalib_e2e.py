@@ -422,6 +422,36 @@ def test_current_ea_roundtrip(source, open_handle):
     assert handle.execute_python("db.current_ea")["result"] == start
 
 
+def test_analyzed_database_reopen_without_background_analysis_is_complete(
+    source, open_handle
+):
+    original = open_handle(source)
+    assert original.wait_autoanalysis(timeout=60)["complete"]
+    saved = original.save_database()["idb_path"]
+    original.close(wait_for_database=True, timeout=30)
+
+    reopened = open_handle(saved, auto_analysis=False)
+    status = reopened.poll_autoanalysis()
+    assert status["status"] == "complete"
+    assert status["complete"] is True
+    assert (
+        reopened.execute_python("import ida_auto; ida_auto.auto_is_ok()")["result"]
+        is True
+    )
+
+    # An already drained database must install its event hooks without an
+    # explicit wait or a background analysis tick.
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        reopened.subscribe_idb_events() as events,
+    ):
+        renamed = pool.submit(
+            lambda: next(event for event in events if event["event_name"] == "renamed")
+        )
+        reopened.execute_python(RENAME.format(name="NEXUS_ANALYZED_REOPEN"))
+        assert renamed.result(timeout=10)["new_name"] == "NEXUS_ANALYZED_REOPEN"
+
+
 def test_deferred_analysis_namespaces_and_real_idb_events(source, open_handle):
     writer = open_handle(source, auto_analysis=False)
     observer = open_handle(source)
