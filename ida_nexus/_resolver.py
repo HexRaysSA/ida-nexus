@@ -195,7 +195,7 @@ def spawn_worker(
         popen_options["creationflags"] = creationflags
     else:
         popen_options["start_new_session"] = True
-    process: subprocess.Popen[bytes] = subprocess.Popen(
+    process: Any = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,

@@ -122,7 +122,9 @@ def _prepare_ida_domain() -> None:
         return
     import ida_kernwin
 
-    if ida_kernwin.is_ida_library(None, 0, None):
+    # The SWIG stub types the output parameters as ints; None is what works.
+    kernwin: Any = ida_kernwin
+    if kernwin.is_ida_library(None, 0, None):
         sys.modules["idapro"] = _IdaproUnavailable("idapro")
 
 
@@ -147,8 +149,8 @@ class NexusSession:
         on_shutdown: Callable[[], None] | None = None,
         log: Callable[[str], None] = _print_log,
     ) -> None:
-        self.backend = backend
-        self.host = host
+        self.backend: BackendName = backend
+        self.host: HostName = host
         self.managed = managed
         self.record_suffix = record_suffix
         self.lease_grace = validate_lease_grace(lease_grace)
