@@ -150,7 +150,7 @@ disk permanently to avoid split-inode locking races.
 4. Return a `READY` owner or report a lock-held `BLOCKED` owner.
 5. Acquire `spawn/<idb-key>.lock` and repeat the scan.
 6. If still absent, validate the source path and start the host chosen by
-   `select_host`: `idat` when the ida-nexus (or ida-mcp) plugin is installed
+   `select_backend`: `idat` when the ida-nexus (or ida-mcp) plugin is installed
    for IDA, the `ida-nexus worker` console script of this interpreter
    otherwise, or `ida` for `gui=True`. Headless hosts are hidden, detached
    managed workers; the GUI is unmanaged. `IDA_NEXUS_IDALIB_ONLY=1` forces the
@@ -295,7 +295,7 @@ A published `instances/<record-id>.json` record has these fields:
 | Fields | Contract |
 |---|---|
 | `record_id` | `<pid>-<six lowercase hex digits>` and equal to the filename stem. |
-| `backend` | `gui` or `idalib`. |
+| `backend` | `gui`, `idalib`, or `idat`: which IDA process serves the database. Everything except `gui` is a headless worker. |
 | `pid`, `port` | Positive process ID and loopback TCP port. |
 | `token` | Bearer secret used by every per-database HTTP request. |
 | `version` | Exact Nexus protocol version. |
@@ -303,15 +303,14 @@ A published `instances/<record-id>.json` record has these fields:
 | `idb_key` | The 16-hex-digit identity described in **Database identity**. |
 | `managed` | Whether zero leases trigger worker shutdown. |
 | `started_at` | Unix start timestamp. |
-| `host` | `gui`, `idat`, or `idalib`: which IDA process serves the database. A `gui` backend is always hosted by `gui`; an `idalib` backend by `idalib` or `idat`. |
 
 The matching lifetime lock, atomic publication order, IDB identity algorithm,
 spawn-lock naming, and `READY`/`BLOCKED`/`DEAD` rules are part of this discovery
 contract. Readers require all fields above and ignore unknown additive fields.
 
 `GET /health` must return `status: "ok"` plus the record's `record_id`,
-`backend`, `host`, `pid`, `version`, `idb_path`, `idb_key`, `exe_path`,
-`managed`, and `started_at`. The port and token are not echoed. A client
+`backend`, `pid`, `version`, `idb_path`, `idb_key`, `exe_path`, `managed`,
+and `started_at`. The port and token are not echoed. A client
 compares every known field but ignores unknown additive health fields.
 
 ### Wire and lifecycle contract

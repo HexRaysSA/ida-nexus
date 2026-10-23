@@ -24,15 +24,11 @@ SPAWN_DIR = STATE_DIR / "spawn"
 LOG_DIR = STATE_DIR / "logs"
 PROTOCOL_VERSION = 10
 DEFAULT_TIMEOUT = 1.0
-BackendName = Literal["gui", "idalib"]
-BACKEND_NAMES: tuple[BackendName, ...] = ("gui", "idalib")
-# Which IDA process serves the database. "idalib" and "idat" are both headless
-# idalib-backend workers; "gui" is the interactive IDA plugin.
-HostName = Literal["gui", "idalib", "idat"]
-HOSTS_BY_BACKEND: dict[str, tuple[HostName, ...]] = {
-    "gui": ("gui",),
-    "idalib": ("idalib", "idat"),
-}
+# Which IDA process serves the database: the interactive IDA plugin, a worker
+# in the client's Python using idalib, or text-mode IDA in IDA's own Python.
+# Everything except "gui" is a headless worker.
+BackendName = Literal["gui", "idalib", "idat"]
+BACKEND_NAMES: tuple[BackendName, ...] = ("gui", "idalib", "idat")
 
 
 def _event_origin_id(lease_id: str) -> str:
@@ -192,14 +188,7 @@ class InstanceIdentity:
     idb_path: str
     exe_path: str
     backend: BackendName
-    host: HostName = field(kw_only=True)
     managed: bool = False
-
-    def __post_init__(self) -> None:
-        if self.host not in HOSTS_BY_BACKEND.get(self.backend, ()):
-            raise ValueError(
-                f"host {self.host!r} cannot serve the {self.backend!r} backend"
-            )
 
 
 @dataclass(frozen=True)
@@ -223,7 +212,6 @@ class DatabaseInstance:
     exe_path: str
     managed: bool
     started_at: float
-    host: HostName
 
     def health_identity(self) -> dict[str, Any]:
         payload = self._registry_payload()
@@ -298,7 +286,6 @@ class InstanceRegistration:
             exe_path=exe_path,
             managed=self.identity.managed,
             started_at=time.time(),
-            host=self.identity.host,
         )
         target = self.directory / f"{self.record_id}.json"
         fd, temporary_name = tempfile.mkstemp(
@@ -369,7 +356,6 @@ def load_registry_entry(path: str | os.PathLike[str]) -> DatabaseInstance:
         "exe_path",
         "managed",
         "started_at",
-        "host",
     }
     missing = required.difference(payload)
     if missing:
@@ -382,8 +368,6 @@ def load_registry_entry(path: str | os.PathLike[str]) -> DatabaseInstance:
         raise ValueError("record ID does not match its filename")
     if payload["backend"] not in BACKEND_NAMES:
         raise ValueError("registry entry has an invalid backend")
-    if payload["host"] not in HOSTS_BY_BACKEND[payload["backend"]]:
-        raise ValueError("registry entry has an invalid host")
     if (
         not isinstance(payload["pid"], int)
         or isinstance(payload["pid"], bool)

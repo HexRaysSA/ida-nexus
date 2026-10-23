@@ -38,7 +38,6 @@ def database_servers(tmp_path):
                     str(idb),
                     str(source),
                     "gui" if gui else "idalib",
-                    host="gui" if gui else "idalib",
                     managed=not gui,
                 ),
                 AnalysisState(),

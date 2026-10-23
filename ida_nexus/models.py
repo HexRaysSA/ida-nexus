@@ -33,8 +33,7 @@ DatabaseStatus = Literal["available", "attached", "current", "unavailable"]
 
 class DatabaseListing(TypedDict):
     path: str
-    backend: Annotated[str, "Instance backend: gui or idalib."]
-    host: Annotated[str, "IDA process serving it: gui, idat, or idalib."]
+    backend: Annotated[str, "IDA process serving it: gui, idalib, or idat."]
     status: Annotated[
         str,
         "Action state: available, attached, current, or unavailable.",

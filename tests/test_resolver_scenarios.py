@@ -57,7 +57,6 @@ def records(source):
                     str(path or expected_idb_path(source)),
                     str(source),
                     backend,
-                    host=backend,
                 ),
                 token="test-token",
                 record_suffix=record_suffix,

@@ -577,7 +577,7 @@ class NexusHTTPServer:
         if lease_id is None:
             raise APIError("invalid_lease", "lease_id is required")
         with self._activity:
-            if not self.identity.managed or self.identity.backend != "idalib":
+            if not self.identity.managed or self.identity.backend == "gui":
                 raise APIError(
                     "shutdown_not_supported",
                     "Only managed idalib workers can be shut down remotely",

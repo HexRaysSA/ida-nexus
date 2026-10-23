@@ -39,7 +39,7 @@ IDA from a temporary directory.
 The client and IDA may use different Python minor versions. The missing-package
 scenario queries IDA's interpreter before creating its empty virtualenv.
 On macOS, an activated IDAPython venv can also make `sys.executable` name Python
-rather than `idat`; `instance.host` reports the host independently of that path.
+rather than `idat`; `instance.backend` reports the process independently of that path.
 Nexus removes the client's `PYTHONHOME` and activated-venv settings when starting
 native IDA, while preserving `IDAPYTHON_VENV_EXECUTABLE`.
 

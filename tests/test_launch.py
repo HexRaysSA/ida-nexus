@@ -15,7 +15,7 @@ from ida_nexus._launch import (
     join_ida_switches,
     quote_ida_argument,
     script_switch,
-    select_host,
+    select_backend,
     worker_command,
 )
 from ida_nexus.errors import DatabaseOpenError
@@ -100,9 +100,9 @@ def test_idalib_only_accepts_the_usual_truthy_spellings(monkeypatch, value):
 
 
 def test_without_the_plugin_workers_stay_in_idalib(ida_home):
-    assert select_host(gui=False) == ("idalib", None)
+    assert select_backend(gui=False) == ("idalib", None)
     with pytest.raises(DatabaseOpenError, match="hcli plugin install"):
-        select_host(gui=True)
+        select_backend(gui=True)
 
 
 def test_with_the_plugin_idat_is_preferred_and_ida_opens_the_gui(ida_home):
@@ -110,17 +110,17 @@ def test_with_the_plugin_idat_is_preferred_and_ida_opens_the_gui(ida_home):
     install_plugin(idausr)
     (install / "idat").write_bytes(b"")
     (install / "ida").write_bytes(b"")
-    assert select_host(gui=False) == ("idat", str(install / "idat"))
-    assert select_host(gui=True) == ("gui", str(install / "ida"))
+    assert select_backend(gui=False) == ("idat", str(install / "idat"))
+    assert select_backend(gui=True) == ("gui", str(install / "ida"))
 
 
 def test_plugin_without_executables_fails_instead_of_falling_back(ida_home):
     idausr, _install = ida_home
     install_plugin(idausr)
     with pytest.raises(DatabaseOpenError, match="IDA_NEXUS_IDALIB_ONLY"):
-        select_host(gui=False)
+        select_backend(gui=False)
     with pytest.raises(DatabaseOpenError, match="not found"):
-        select_host(gui=True)
+        select_backend(gui=True)
 
 
 def test_idalib_only_overrides_the_plugin_and_refuses_the_gui(ida_home, monkeypatch):
@@ -129,9 +129,9 @@ def test_idalib_only_overrides_the_plugin_and_refuses_the_gui(ida_home, monkeypa
     (install / "idat").write_bytes(b"")
     (install / "ida").write_bytes(b"")
     monkeypatch.setenv("IDA_NEXUS_IDALIB_ONLY", "1")
-    assert select_host(gui=False) == ("idalib", None)
+    assert select_backend(gui=False) == ("idalib", None)
     with pytest.raises(DatabaseOpenError, match="IDA_NEXUS_IDALIB_ONLY"):
-        select_host(gui=True)
+        select_backend(gui=True)
 
 
 # --------------------------------------------------------------- switches
