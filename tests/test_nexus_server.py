@@ -1,10 +1,15 @@
 import gzip
 import json
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from http.client import HTTPConnection
 from pathlib import Path
+
+import pytest
 
 from ida_nexus._http import POST_BODY_LIMIT
 from ida_nexus._registry import InstanceIdentity, load_registry_entry
@@ -135,6 +140,122 @@ def raw_request(server: NexusHTTPServer, data: bytes):
         connection.close()
 
 
+@pytest.mark.skipif(
+    not hasattr(socket, "SO_NOSIGPIPE") and not hasattr(socket, "MSG_NOSIGNAL"),
+    reason="requires socket-level SIGPIPE suppression",
+)
+@pytest.mark.parametrize("mode", ["response", "error", "continue", "stream"])
+def test_http_disconnect_preserves_native_host(mode: str) -> None:
+    # Only the child restores SIG_DFL: doing so in pytest would endanger the
+    # runner and would not model Python embedded in a native application.
+    script = textwrap.dedent(
+        r"""
+        import signal
+        import socket
+        import sys
+        import threading
+        from http.client import HTTPConnection
+        from ida_nexus._http import HTTPResponse, LocalHTTPServer, RequestHandler
+
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+        mode = sys.argv[1]
+        entered = threading.Event()
+        resume = threading.Event()
+        finished = threading.Event()
+
+        def wait_for_disconnect():
+            entered.set()
+            assert resume.wait(5)
+
+        class Handler(RequestHandler):
+            def send_error(self, code, message=None, explain=None):
+                if mode == "error":
+                    wait_for_disconnect()
+                super().send_error(code, message, explain)
+
+            def handle_expect_100(self):
+                if mode == "continue":
+                    wait_for_disconnect()
+                return super().handle_expect_100()
+
+            def finish(self):
+                try:
+                    super().finish()
+                finally:
+                    finished.set()
+
+        def stream(file):
+            wait_for_disconnect()
+            file.write(b"event: health\ndata: {}\n\n")
+            file.flush()
+
+        def application(method, path, query, body):
+            if path == "/disconnect":
+                if mode == "stream":
+                    return HTTPResponse(
+                        200, content_type="text/event-stream", stream=stream
+                    )
+                wait_for_disconnect()
+                return HTTPResponse(200, b"disconnected")
+            return HTTPResponse(200, b"alive")
+
+        server = LocalHTTPServer("test-token", application)
+        server.RequestHandlerClass = Handler
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+            host = "invalid" if mode == "error" else f"127.0.0.1:{server.port}"
+            expect = "Expect: 100-continue\r\n" if mode == "continue" else ""
+            client.sendall(
+                (
+                    f"GET /disconnect HTTP/1.1\r\nHost: {host}\r\n"
+                    f"Authorization: Bearer test-token\r\n{expect}\r\n"
+                ).encode()
+            )
+            assert entered.wait(5)
+            with server._worker_condition:
+                active = tuple(server._active_connections)
+            assert len(active) == 1
+            # FIN arrival alone races TCP's first successful write. Shutting
+            # down the server write half guarantees EPIPE, and also models
+            # LocalHTTPServer.server_close interrupting a live SSE lease.
+            active[0].shutdown(socket.SHUT_WR)
+            client.close()
+            resume.set()
+            assert finished.wait(5)
+
+            connection = HTTPConnection("127.0.0.1", server.port, timeout=5)
+            connection.request(
+                "GET", "/ok",
+                headers={"Authorization": "Bearer test-token", "Connection": "close"},
+            )
+            response = connection.getresponse()
+            assert response.status == 200
+            assert response.read() == b"alive"
+            connection.close()
+            assert signal.getsignal(signal.SIGPIPE) == signal.SIG_DFL
+        finally:
+            resume.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+        assert not thread.is_alive()
+        print("survived disconnect and normal request")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, mode],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert result.stdout.strip() == "survived disconnect and normal request"
+
+
 def make_server(tmp_path: Path, *, gui: bool = False):
     analysis = AnalysisState()
     backend = RecordingBackend(analysis)
@@ -142,6 +263,7 @@ def make_server(tmp_path: Path, *, gui: bool = False):
         idb_path="/tmp/test.i64",
         exe_path="/tmp/test.exe",
         backend="gui" if gui else "idalib",
+        host="gui" if gui else "idalib",
     )
     server = NexusHTTPServer(
         backend,
@@ -195,7 +317,7 @@ def test_background_autoanalysis_prioritizes_operations_without_reserving_ids(
     backend = SlicedBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"),
         analysis,
         tmp_path,
         token="test-token",
@@ -274,7 +396,7 @@ def test_explicit_wait_takes_over_from_sliced_autoanalysis(tmp_path: Path):
     backend = TakeoverBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"),
         analysis,
         tmp_path,
         token="test-token",
@@ -325,7 +447,7 @@ def test_stop_prevents_waiting_autoanalysis_slice_from_starting(tmp_path: Path):
     backend = RecordingBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"),
         analysis,
         tmp_path,
         token="test-token",
@@ -375,7 +497,7 @@ def test_autoanalysis_requires_published_server(tmp_path: Path):
     analysis = AnalysisState()
     server = NexusHTTPServer(
         RecordingBackend(analysis),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"),
         analysis,
         tmp_path,
     )
@@ -430,7 +552,9 @@ def test_server_stop_closes_idle_keep_alive_connection(tmp_path: Path):
 
 def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
     analysis = AnalysisState()
-    identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
+    identity = InstanceIdentity(
+        "/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"
+    )
     parameter_sets: tuple[tuple[str, float, float], ...] = (
         ("lease_grace", float("nan"), 1.0),
         ("lease_grace", float("inf"), 1.0),
@@ -827,6 +951,7 @@ def test_managed_lease_expires_after_its_idle_timeout(tmp_path: Path):
             "/tmp/test.i64",
             "/tmp/test.exe",
             "idalib",
+            host="idalib",
             managed=True,
         ),
         analysis,
@@ -871,6 +996,7 @@ def test_active_request_suspends_lease_idle_expiration(tmp_path: Path):
             "/tmp/test.i64",
             "/tmp/test.exe",
             "idalib",
+            host="idalib",
             managed=True,
         ),
         analysis,
@@ -908,6 +1034,7 @@ def test_indefinite_lease_keeps_worker_after_timed_lease_expires(
             "/tmp/test.i64",
             "/tmp/test.exe",
             "idalib",
+            host="idalib",
             managed=True,
         ),
         analysis,
@@ -1084,7 +1211,9 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
 
     analysis = AnalysisState()
     backend = SessionBackend(analysis)
-    identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
+    identity = InstanceIdentity(
+        "/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib"
+    )
     server = NexusHTTPServer(
         backend,
         identity,
@@ -1151,7 +1280,9 @@ def test_disconnected_sse_skips_startup_grace(tmp_path: Path):
     backend = RecordingBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", managed=True),
+        InstanceIdentity(
+            "/tmp/test.i64", "/tmp/test.exe", "idalib", host="idalib", managed=True
+        ),
         analysis,
         tmp_path,
         lease_grace=30,

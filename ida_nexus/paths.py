@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import sysconfig
@@ -63,3 +64,83 @@ def _find_console_script(name: str) -> str:
 
 
 STATE_DIR = get_state_dir()
+
+
+def _idausr_dirs() -> list[Path]:
+    """Every IDA user directory, in search order."""
+    idausr = os.environ.get("IDAUSR")
+    if idausr:
+        found = [
+            Path(entry.strip()).expanduser()
+            for entry in idausr.split(os.pathsep)
+            if entry.strip()
+        ]
+        if found:
+            return found
+    return [_get_idausr_dir()]
+
+
+def find_ida_install_dir() -> Path | None:
+    """Return IDA's installation directory the way the ``idapro`` package finds it.
+
+    ``IDADIR`` wins; otherwise ``Paths.ida-install-dir`` from ``ida-config.json``
+    in the primary user directory. Returns None when neither names a directory.
+    """
+    idadir = os.environ.get("IDADIR")
+    if idadir:
+        return Path(idadir).expanduser()
+    config_path = _get_idausr_dir() / "ida-config.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    paths = config.get("Paths") if isinstance(config, dict) else None
+    value = paths.get("ida-install-dir") if isinstance(paths, dict) else None
+    if isinstance(value, str) and value.strip():
+        return Path(value).expanduser()
+    return None
+
+
+def find_ida_executable(name: str) -> Path | None:
+    """Locate ``ida`` or ``idat`` inside the configured installation.
+
+    Covers the flat Windows and Linux layouts and the macOS application bundle.
+    """
+    root = find_ida_install_dir()
+    if root is None:
+        return None
+    for candidate in (
+        root / f"{name}.exe",
+        root / name,
+        root / "Contents" / "MacOS" / name,
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+NEXUS_PLUGIN_NAMES = ("ida-nexus", "ida-mcp")
+
+
+def nexus_plugin_installed() -> bool:
+    """Whether a plugin that depends on ida-nexus is installed for IDA.
+
+    hcli installs a plugin's Python dependencies into IDA's own Python, so a
+    present plugin means ``ida_nexus`` is importable inside ``ida`` and ``idat``.
+    """
+    return any(
+        (directory / "plugins" / name / "ida-plugin.json").is_file()
+        for directory in _idausr_dirs()
+        for name in NEXUS_PLUGIN_NAMES
+    )
+
+
+def idalib_only() -> bool:
+    """Operator opt-out: never start ``ida`` or ``idat``, only idalib workers."""
+    value = os.environ.get("IDA_NEXUS_IDALIB_ONLY", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+BOOTSTRAP_SCRIPT = (
+    Path(__file__).resolve().with_name("_bootstrap") / "ida_nexus_bootstrap.py"
+)

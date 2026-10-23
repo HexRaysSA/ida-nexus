@@ -517,7 +517,10 @@ class IDARuntime:
             self._active_cancel_event.set()
             if self.backend != "gui":
                 ida_kernwin.set_cancelled()
-            if self._active_thread_id is not None:
+            # Analysis checks between bounded native steps. Injecting after
+            # set_cancelled() can land in its finally block and skip restoration
+            # of the analyzer flags.
+            if self._active_thread_id is not None and kind != "analysis":
                 _interrupt_thread(self._active_thread_id)
 
         if self.backend == "gui":
@@ -968,11 +971,16 @@ class IDARuntime:
             completed = False
             try:
                 # Native auto_wait() does not return to Python until the entire
-                # queue drains, preventing our timeout/cancel interrupt from
-                # taking effect. Keep one operation/deadline, but return to
-                # Python between native steps so _OperationInterrupt can unwind.
-                while ida_auto.auto_make_step(0, ida_idaapi.BADADDR):
-                    pass
+                # queue drains. Check cancellation between bounded native steps
+                # instead of injecting an exception into state-restoring cleanup.
+                while True:
+                    more = ida_auto.auto_make_step(0, ida_idaapi.BADADDR)
+                    with self._active_lock:
+                        error = self._active_interrupt_error
+                    if error is not None:
+                        raise error
+                    if not more:
+                        break
                 if not ida_auto.auto_is_ok():
                     return False
                 # An explicit successful wait opts into normal ongoing analysis,

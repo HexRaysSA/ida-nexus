@@ -35,7 +35,11 @@ def database_servers(tmp_path):
             server = NexusHTTPServer(
                 backend or StaticBackend(),
                 InstanceIdentity(
-                    str(idb), str(source), "gui" if gui else "idalib", managed=not gui
+                    str(idb),
+                    str(source),
+                    "gui" if gui else "idalib",
+                    host="gui" if gui else "idalib",
+                    managed=not gui,
                 ),
                 AnalysisState(),
                 REGISTRY_DIR,

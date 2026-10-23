@@ -5,8 +5,15 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
+from ._launch import (
+    WorkerLaunchOptions,
+    ida_command,
+    ida_environment,
+    select_host,
+    worker_command,
+)
 from ._registry import (
     DEFAULT_TIMEOUT,
     LOG_DIR,
@@ -14,6 +21,7 @@ from ._registry import (
     DatabaseInstance,
     DiscoveredDatabase,
     FileLock,
+    HostName,
     InstanceState,
     canonical_path,
     ensure_private_directory,
@@ -24,7 +32,6 @@ from .database_state import (
     _backup_unpacked_database,
     expected_idb_path,
     probe_database_state,
-    unpacked_database_paths,
 )
 from .errors import (
     AmbiguousDatabaseError,
@@ -37,72 +44,18 @@ from .paths import _find_console_script
 
 
 @dataclass(frozen=True)
-class WorkerLaunchOptions:
-    """Options used only when a new idalib worker is spawned.
+class SpawnedWorker:
+    """What a spawner hands back: the process plus how to recognize its record."""
 
-    Mostly IDA import options, which reach the worker as command-line
-    arguments. ``worker_env`` and ``worker_cwd`` are not: they configure the
-    process itself and are handed to the spawn instead.
-    """
-
-    worker_env: Mapping[str, str] | None = None
-    worker_cwd: str | None = None
-    auto_analysis: bool = True
-    image_base: int | None = None
-    new_database: bool = False
-    compiler: str | None = None
-    first_pass_directives: tuple[str, ...] = ()
-    second_pass_directives: tuple[str, ...] = ()
-    disable_fpp: bool = False
-    entry_point: int | None = None
-    jit_debugger: bool | None = None
-    log_file: str | None = None
-    disable_mouse: bool = False
-    plugin_options: str | None = None
-    processor: str | None = None
-    db_compression: str | None = None
-    run_debugger: str | None = None
-    load_resources: bool = True
-    script_file: str | None = None
-    script_args: tuple[str, ...] = ()
-    file_type: str | None = None
-    file_member: str | None = None
-    empty_database: bool = False
-    windows_dir: str | None = None
-    no_segmentation: bool = False
-    debug_flags: int | tuple[str, ...] = 0
-    save_after_open: bool = False
-
-    def __post_init__(self) -> None:
-        if self.image_base is not None:
-            if isinstance(self.image_base, bool) or self.image_base < 0:
-                raise ValueError("image_base must be a non-negative byte address")
-            if self.image_base % 16:
-                raise ValueError("image_base must be 16-byte aligned")
-        if self.entry_point is not None and (
-            isinstance(self.entry_point, bool) or self.entry_point < 0
-        ):
-            raise ValueError("entry_point must be a non-negative byte address")
-        if self.db_compression not in {None, "compress", "pack", "no_pack"}:
-            raise ValueError(
-                "db_compression must be 'compress', 'pack', 'no_pack', or None"
-            )
-        if self.file_member and not self.file_type:
-            raise ValueError("file_member requires file_type")
-        if self.script_args and not self.script_file:
-            raise ValueError("script_args require script_file")
-        if isinstance(self.debug_flags, bool):
-            raise TypeError("debug_flags must be an integer mask or flag names")
-        if isinstance(self.debug_flags, int):
-            if self.debug_flags < 0:
-                raise ValueError("debug_flags mask must not be negative")
-        elif any(not flag for flag in self.debug_flags):
-            raise ValueError("debug flag names must not be empty")
+    process: subprocess.Popen[bytes]
+    log_path: Path
+    record_suffix: str
+    host: HostName = "idalib"
 
 
 WorkerSpawner = Callable[
     [str, str, float, WorkerLaunchOptions],
-    tuple[subprocess.Popen[bytes], Path],
+    SpawnedWorker,
 ]
 
 
@@ -167,121 +120,6 @@ def _resolve_existing(
     )
 
 
-def _build_worker_command(
-    source: str,
-    expected_idb: str,
-    lease_grace: float,
-    options: WorkerLaunchOptions,
-    *,
-    launcher: Sequence[str],
-    record_suffix: str,
-) -> list[str]:
-    """Build a worker command without starting a subprocess."""
-    if not math.isfinite(lease_grace) or lease_grace < 0:
-        raise ValueError("lease_grace must be a finite non-negative number")
-    # A fresh database must be created from the original input, never by
-    # reopening the old IDB that is about to be replaced.
-    input_path = (
-        source
-        if options.new_database
-        else expected_idb
-        if os.path.exists(expected_idb)
-        else source
-    )
-    if not options.new_database and (
-        input_path == expected_idb or unpacked_database_paths(expected_idb)[0].exists()
-    ):
-        # Loader/import switches are baked into an existing IDB, packed or
-        # unpacked. Passing them again makes IDA terminate with a fatal error
-        # (-b and -R may be used only while loading a new file), so an existing
-        # database is reopened without source-import configuration.
-        # Autoanalysis and saving are worker lifecycle policy, not options
-        # baked into the IDB, so they survive.
-        options = WorkerLaunchOptions(
-            auto_analysis=options.auto_analysis,
-            save_after_open=options.save_after_open,
-            load_resources=False,
-        )
-    command = [
-        *launcher,
-        input_path,
-        "--managed",
-        "--record-suffix",
-        record_suffix,
-        "--lease-grace",
-        str(lease_grace),
-    ]
-    default_idb = expected_idb_path(source)
-    if (
-        input_path == source
-        and source != expected_idb
-        and (options.new_database or expected_idb != default_idb)
-    ):
-        command.extend(["--output-database", expected_idb])
-    if options.auto_analysis:
-        command.append("--auto-analysis")
-    else:
-        command.append("--no-auto-analysis")
-    if options.save_after_open:
-        command.append("--save-after-open")
-    if options.image_base is not None:
-        command.extend(["--image-base", hex(options.image_base)])
-    if options.new_database:
-        command.append("--new-database")
-    if options.compiler:
-        command.append(f"--compiler={options.compiler}")
-    command.extend(
-        f"--first-pass-directive={directive}"
-        for directive in options.first_pass_directives
-    )
-    command.extend(
-        f"--second-pass-directive={directive}"
-        for directive in options.second_pass_directives
-    )
-    if options.disable_fpp:
-        command.append("--disable-fpp")
-    if options.entry_point is not None:
-        command.extend(["--entry-point", hex(options.entry_point)])
-    if options.jit_debugger is not None:
-        command.append(
-            "--jit-debugger" if options.jit_debugger else "--no-jit-debugger"
-        )
-    if options.log_file:
-        command.extend(["--log-file", options.log_file])
-    if options.disable_mouse:
-        command.append("--disable-mouse")
-    if options.plugin_options:
-        command.append(f"--plugin-options={options.plugin_options}")
-    if options.processor:
-        command.extend(["--processor", options.processor])
-    if options.db_compression:
-        command.extend(["--db-compression", options.db_compression])
-    if options.run_debugger:
-        command.append(f"--run-debugger={options.run_debugger}")
-    if options.load_resources:
-        command.append("--load-resources")
-    if options.script_file:
-        command.extend(["--script-file", options.script_file])
-    command.extend(f"--script-arg={argument}" for argument in options.script_args)
-    if options.file_type:
-        command.extend(["--file-type", options.file_type])
-    if options.file_member:
-        command.extend(["--file-member", options.file_member])
-    if options.empty_database:
-        command.append("--empty-database")
-    if options.windows_dir:
-        command.extend(["--windows-dir", options.windows_dir])
-    if options.no_segmentation:
-        command.append("--no-segmentation")
-    if isinstance(options.debug_flags, int):
-        if options.debug_flags:
-            command.extend(["--debug-mask", hex(options.debug_flags)])
-    else:
-        command.extend(f"--debug-flag={flag}" for flag in options.debug_flags)
-
-    return command
-
-
 class _SpawnEnvironment(TypedDict, total=False):
     env: dict[str, str]
     cwd: str
@@ -292,21 +130,18 @@ def spawn_worker(
     expected_idb: str,
     lease_grace: float,
     options: WorkerLaunchOptions | None = None,
-) -> tuple[subprocess.Popen[bytes], Path]:
-    suffix = os.urandom(3).hex()
-    try:
-        executable = _find_console_script("ida-nexus")
-    except FileNotFoundError as error:
-        raise DatabaseOpenError(str(error)) from error
+) -> SpawnedWorker:
+    """Start the IDA process that will own ``expected_idb``.
+
+    :func:`select_host` decides which executable runs. The idalib worker logs
+    to ``logs/<suffix>.log`` itself; ``idat`` and ``ida`` are told to log there
+    with ``-L`` unless the caller asked for its own IDA log file, which then
+    doubles as the worker log.
+    """
     options = options or WorkerLaunchOptions()
-    command = _build_worker_command(
-        source,
-        expected_idb,
-        lease_grace,
-        options,
-        launcher=[executable, "worker"],
-        record_suffix=suffix,
-    )
+    host, executable = select_host(gui=options.gui)
+    suffix = os.urandom(3).hex()
+    log_path = ensure_private_directory(LOG_DIR) / f"{suffix}.log"
     # Left out entirely when unset, so the worker keeps inheriting this
     # process as it always has.
     spawn_environment: _SpawnEnvironment = {}
@@ -315,31 +150,63 @@ def spawn_worker(
     if options.worker_cwd is not None:
         spawn_environment["cwd"] = options.worker_cwd
 
-    process: subprocess.Popen[bytes]
-    if os.name == "nt":
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=False,
-            creationflags=(
-                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-            ),
-            **spawn_environment,
+    hidden = True
+    if executable is None:
+        try:
+            console_script = _find_console_script("ida-nexus")
+        except FileNotFoundError as error:
+            raise DatabaseOpenError(str(error)) from error
+        command = worker_command(
+            console_script,
+            source,
+            expected_idb,
+            lease_grace,
+            options,
+            record_suffix=suffix,
         )
     else:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=False,
-            start_new_session=True,
-            **spawn_environment,
+        if options.log_file:
+            log_path = Path(options.log_file)
+            if not log_path.is_absolute():
+                log_path = Path(options.worker_cwd or os.getcwd()) / log_path
+            log_path = log_path.absolute()
+        command = ida_command(
+            executable,
+            host,
+            source,
+            expected_idb,
+            lease_grace,
+            options,
+            record_suffix=suffix,
+            log_path=log_path,
         )
-    log_path = ensure_private_directory(LOG_DIR) / f"{process.pid}-{suffix}.log"
-    return process, log_path
+        environment = ida_environment(
+            options.worker_env if options.worker_env is not None else os.environ
+        )
+        if host == "idat":
+            # IDA's text UI runs without a terminal only when told so.
+            environment["TVHEADLESS"] = "1"
+        else:
+            hidden = False
+        spawn_environment["env"] = environment
+
+    popen_options: dict[str, Any] = dict(spawn_environment)
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+        if hidden:
+            creationflags |= subprocess.CREATE_NO_WINDOW
+        popen_options["creationflags"] = creationflags
+    else:
+        popen_options["start_new_session"] = True
+    process: Any = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=False,
+        **popen_options,
+    )
+    return SpawnedWorker(process, log_path, suffix, host)
 
 
 def _log_tail(path: Path, limit: int = 16 * 1024) -> str:
@@ -374,23 +241,22 @@ def _launcher_exit_is_fatal(returncode: int, platform: str) -> bool:
 
 
 def _await_ready(
-    process: subprocess.Popen[bytes],
-    expected_idb: str,
-    log_path: Path,
-    deadline: float,
+    spawned: SpawnedWorker, expected_idb: str, deadline: float
 ) -> DatabaseInstance:
+    process, log_path, host = spawned.process, spawned.log_path, spawned.host
     expected_key = idb_key(expected_idb)
     # Launcher and worker PIDs may differ, and unrelated workers in different
     # PID namespaces may share a numeric PID. Only the random suffix passed
-    # explicitly to the worker identifies this launch.
-    record_suffix = log_path.stem.rsplit("-", 1)[-1]
+    # explicitly to the worker identifies this launch. The GUI plugin registers
+    # on its own and never sees the suffix, so there the IDA process itself,
+    # which we started directly, is the identity.
+    record_suffix = spawned.record_suffix
     last_detail: str | None = None
-    actual_log_path = log_path
     while True:
         now = time.monotonic()
         if now >= deadline:
-            tail = _log_tail(actual_log_path)
-            message = f"timed out waiting for idalib worker {process.pid}"
+            tail = _log_tail(log_path)
+            message = f"timed out waiting for {host} worker {process.pid}"
             if last_detail:
                 message += f": {last_detail}"
             if tail:
@@ -409,11 +275,12 @@ def _await_ready(
         matched_record = False
         for instance in instances:
             entry = instance.instance
-            launched_by_us = entry.record_id.endswith(f"-{record_suffix}")
+            launched_by_us = entry.record_id.endswith(f"-{record_suffix}") or (
+                host == "gui" and entry.pid == process.pid
+            )
             if not launched_by_us:
                 continue
             matched_record = True
-            actual_log_path = log_path.with_name(f"{entry.record_id}.log")
             if entry.idb_key != expected_key:
                 raise WorkerStartError(
                     f"worker {entry.pid} opened {entry.idb_path}, "
@@ -424,22 +291,20 @@ def _await_ready(
             last_detail = instance.detail
 
         returncode = process.poll()
-        if returncode is not None and not matched_record:
-            matches = list(log_path.parent.glob(f"*-{record_suffix}.log"))
-            if matches:
-                actual_log_path = max(matches, key=lambda path: path.stat().st_mtime)
-            # uv/pip console-script launchers on Windows can exit successfully
-            # after starting the real Python worker under a different PID. The
-            # suffix remains authoritative, so keep waiting for its record.
-            if _launcher_exit_is_fatal(returncode, os.name):
-                tail = _log_tail(actual_log_path)
-                message = (
-                    f"idalib worker launcher {process.pid} exited with status "
-                    f"{returncode}"
-                )
-                if tail:
-                    message += f"\n\n{tail}"
-                raise WorkerStartError(message)
+        # uv/pip console-script launchers on Windows can exit successfully
+        # after starting the real Python worker under a different PID. The
+        # suffix remains authoritative, so keep waiting for its record.
+        # idat and ida are started directly, so their exit is final.
+        if (
+            returncode is not None
+            and not matched_record
+            and (host != "idalib" or _launcher_exit_is_fatal(returncode, os.name))
+        ):
+            tail = _log_tail(log_path)
+            message = f"{host} worker {process.pid} exited with status {returncode}"
+            if tail:
+                message += f"\n\n{tail}"
+            raise WorkerStartError(message)
 
         time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
@@ -453,6 +318,7 @@ def resolve_instance(
     output_database: str | os.PathLike[str] | None = None,
     worker_env: Mapping[str, str] | None = None,
     worker_cwd: str | os.PathLike[str] | None = None,
+    gui: bool = False,
     auto_analysis: bool = True,
     image_base: int | None = None,
     new_database: bool = False,
@@ -469,8 +335,6 @@ def resolve_instance(
     db_compression: str | None = None,
     run_debugger: str | None = None,
     load_resources: bool = True,
-    script_file: str | os.PathLike[str] | None = None,
-    script_args: Sequence[str] = (),
     file_type: str | None = None,
     file_member: str | None = None,
     empty_database: bool = False,
@@ -482,7 +346,7 @@ def resolve_instance(
     """Resolve one database owner, applying IDA options only when spawning.
 
     ``image_base`` uses byte units and must be 16-byte aligned. All remaining
-    launch controls map directly to ``ida_domain.database.IdaCommandOptions``.
+    launch controls become IDA command-line switches for the spawned process.
     """
 
     if not math.isfinite(timeout) or timeout <= 0:
@@ -498,6 +362,7 @@ def resolve_instance(
     launch_options = WorkerLaunchOptions(
         worker_env=worker_env,
         worker_cwd=os.fspath(worker_cwd) if worker_cwd is not None else None,
+        gui=gui,
         auto_analysis=auto_analysis,
         image_base=image_base,
         new_database=new_database,
@@ -514,8 +379,6 @@ def resolve_instance(
         db_compression=db_compression,
         run_debugger=run_debugger,
         load_resources=load_resources,
-        script_file=os.fspath(script_file) if script_file is not None else None,
-        script_args=_string_tuple(script_args),
         file_type=file_type,
         file_member=file_member,
         empty_database=empty_database,
@@ -613,12 +476,7 @@ def resolve_instance(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"timed out resolving {expected_idb}")
-        process, log_path = spawner(
-            source,
-            expected_idb,
-            lease_grace,
-            launch_options,
-        )
-        return _await_ready(process, expected_idb, log_path, deadline)
+        spawned = spawner(source, expected_idb, lease_grace, launch_options)
+        return _await_ready(spawned, expected_idb, deadline)
     finally:
         spawn_lock.close()

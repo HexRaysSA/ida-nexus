@@ -22,9 +22,17 @@ HOST = "127.0.0.1"
 REGISTRY_DIR = STATE_DIR / "instances"
 SPAWN_DIR = STATE_DIR / "spawn"
 LOG_DIR = STATE_DIR / "logs"
-PROTOCOL_VERSION = 9
+PROTOCOL_VERSION = 10
 DEFAULT_TIMEOUT = 1.0
 BackendName = Literal["gui", "idalib"]
+BACKEND_NAMES: tuple[BackendName, ...] = ("gui", "idalib")
+# Which IDA process serves the database. "idalib" and "idat" are both headless
+# idalib-backend workers; "gui" is the interactive IDA plugin.
+HostName = Literal["gui", "idalib", "idat"]
+HOSTS_BY_BACKEND: dict[str, tuple[HostName, ...]] = {
+    "gui": ("gui",),
+    "idalib": ("idalib", "idat"),
+}
 
 
 def _event_origin_id(lease_id: str) -> str:
@@ -184,7 +192,14 @@ class InstanceIdentity:
     idb_path: str
     exe_path: str
     backend: BackendName
+    host: HostName = field(kw_only=True)
     managed: bool = False
+
+    def __post_init__(self) -> None:
+        if self.host not in HOSTS_BY_BACKEND.get(self.backend, ()):
+            raise ValueError(
+                f"host {self.host!r} cannot serve the {self.backend!r} backend"
+            )
 
 
 @dataclass(frozen=True)
@@ -208,6 +223,7 @@ class DatabaseInstance:
     exe_path: str
     managed: bool
     started_at: float
+    host: HostName
 
     def health_identity(self) -> dict[str, Any]:
         payload = self._registry_payload()
@@ -282,6 +298,7 @@ class InstanceRegistration:
             exe_path=exe_path,
             managed=self.identity.managed,
             started_at=time.time(),
+            host=self.identity.host,
         )
         target = self.directory / f"{self.record_id}.json"
         fd, temporary_name = tempfile.mkstemp(
@@ -352,6 +369,7 @@ def load_registry_entry(path: str | os.PathLike[str]) -> DatabaseInstance:
         "exe_path",
         "managed",
         "started_at",
+        "host",
     }
     missing = required.difference(payload)
     if missing:
@@ -362,8 +380,10 @@ def load_registry_entry(path: str | os.PathLike[str]) -> DatabaseInstance:
         raise TypeError("registry entry has an invalid record ID")
     if record_id != entry_path.stem:
         raise ValueError("record ID does not match its filename")
-    if payload["backend"] not in ("gui", "idalib"):
+    if payload["backend"] not in BACKEND_NAMES:
         raise ValueError("registry entry has an invalid backend")
+    if payload["host"] not in HOSTS_BY_BACKEND[payload["backend"]]:
+        raise ValueError("registry entry has an invalid host")
     if (
         not isinstance(payload["pid"], int)
         or isinstance(payload["pid"], bool)
@@ -401,9 +421,8 @@ def load_registry_entry(path: str | os.PathLike[str]) -> DatabaseInstance:
         or not math.isfinite(payload["started_at"])
     ):
         raise TypeError("registry entry has an invalid start time")
-    # Protocol v1 readers ignore additive fields. This lets records gain
-    # optional metadata without making older clients classify a live owner as
-    # absent and potentially spawn over it.
+    # Unknown fields are ignored so records can gain optional metadata without
+    # older clients classifying a live owner as absent and spawning over it.
     values = {name: payload[name] for name in required if name != "token"}
     return DatabaseInstance(_token=payload["token"], **values)
 
@@ -419,7 +438,10 @@ def probe_health(
     if entry.version != PROTOCOL_VERSION:
         return (
             False,
-            f"unsupported protocol version {entry.version}; expected {PROTOCOL_VERSION}",
+            (
+                f"unsupported protocol version {entry.version}; expected "
+                f"{PROTOCOL_VERSION} (update ida-nexus and the IDA plugin to match)"
+            ),
         )
 
     request = Request(

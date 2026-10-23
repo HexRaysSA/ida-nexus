@@ -21,15 +21,19 @@ from ida_nexus import (
     DatabaseDisconnectedError,
     DatabaseHandle,
     DatabaseManager,
+    DatabaseOpenError,
     DatabaseOpenOptions,
     DatabaseSelectionError,
     NexusConnectionError,
     RemoteError,
+    WorkerStartError,
     discover_databases,
     find_database_owner,
+    list_databases,
     probe_database_state,
     wait_database_released,
 )
+from ida_nexus.paths import find_ida_executable, nexus_plugin_installed
 
 pytestmark = pytest.mark.idalib_e2e
 
@@ -40,6 +44,33 @@ func = next(iter(db.functions))
 assert db.functions.set_name(func, {name!r})
 db.functions.get_name(func)
 """
+
+
+@pytest.fixture(params=["idat", "idalib"], autouse=True)
+def worker_host(request, monkeypatch, tmp_path: Path) -> str:
+    """Run every scenario once per headless host.
+
+    ``idat`` is the default whenever the ida-nexus (or ida-mcp) plugin is
+    installed for IDA, so the installed plugin and IDA's Python must import
+    this checkout: ``uv pip install -e . --python <IDA's python>``. The idalib
+    host is the fallback and is forced through the operator opt-out.
+    """
+    if request.param == "idalib":
+        monkeypatch.setenv("IDA_NEXUS_IDALIB_ONLY", "1")
+    else:
+        monkeypatch.delenv("IDA_NEXUS_IDALIB_ONLY", raising=False)
+        if not nexus_plugin_installed() or find_ida_executable("idat") is None:
+            pytest.fail(
+                "the idat host needs the ida-nexus or ida-mcp plugin installed for "
+                "IDA and a configured IDA installation"
+            )
+    # An editable install reaches IDA's Python through a .pth entry naming this
+    # checkout. Python's site module skips that entry when the process already
+    # started in that directory, and IDAPython then drops the working directory
+    # from sys.path, so spawned IDA processes must not inherit the repository
+    # as their working directory.
+    monkeypatch.chdir(tmp_path)
+    return request.param
 
 
 @pytest.fixture
@@ -380,6 +411,47 @@ def test_explicit_wait_enables_analysis_and_persists_to_saved_database(
     assert reopened.returncode == 0, reopened.stdout + reopened.stderr
 
 
+def test_current_ea_roundtrip(source, open_handle):
+    handle = open_handle(source)
+    start = handle.execute_python("db.start_ip")["result"]
+    assert isinstance(start, int)
+    assert (
+        handle.execute_python("db.current_ea = db.start_ip\ndb.current_ea")["result"]
+        == start
+    )
+    assert handle.execute_python("db.current_ea")["result"] == start
+
+
+def test_analyzed_database_reopen_without_background_analysis_is_complete(
+    source, open_handle
+):
+    original = open_handle(source)
+    assert original.wait_autoanalysis(timeout=60)["complete"]
+    saved = original.save_database()["idb_path"]
+    original.close(wait_for_database=True, timeout=30)
+
+    reopened = open_handle(saved, auto_analysis=False)
+    status = reopened.poll_autoanalysis()
+    assert status["status"] == "complete"
+    assert status["complete"] is True
+    assert (
+        reopened.execute_python("import ida_auto; ida_auto.auto_is_ok()")["result"]
+        is True
+    )
+
+    # An already drained database must install its event hooks without an
+    # explicit wait or a background analysis tick.
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        reopened.subscribe_idb_events() as events,
+    ):
+        renamed = pool.submit(
+            lambda: next(event for event in events if event["event_name"] == "renamed")
+        )
+        reopened.execute_python(RENAME.format(name="NEXUS_ANALYZED_REOPEN"))
+        assert renamed.result(timeout=10)["new_name"] == "NEXUS_ANALYZED_REOPEN"
+
+
 def test_deferred_analysis_namespaces_and_real_idb_events(source, open_handle):
     writer = open_handle(source, auto_analysis=False)
     observer = open_handle(source)
@@ -545,10 +617,15 @@ def test_real_autoanalysis_interrupt_preserves_worker(
     state = handle.execute_python(
         "import ida_auto, ida_ida, ida_funcs; "
         "[ida_funcs.get_func_qty(), ida_auto.auto_is_ok(), "
-        "ida_auto.is_auto_enabled(), ida_ida.inf_is_auto_enabled()]"
+        "ida_auto.is_auto_enabled(), ida_ida.inf_is_auto_enabled(), "
+        "ida_auto.peek_auto_queue(0, ida_auto.AU_CODE) - ida_ida.inf_get_start_ea()]"
     )["result"]
-    assert 0 < state[0] <= 20_000, "must begin real analysis before interrupting"
-    assert state[1:] == [False, False, False]
+    # IDA marks code one instruction per step and creates functions only once
+    # the code queue has drained, so a slow machine shows progress as the code
+    # queue head having moved past the entry point rather than as functions.
+    assert state[0] < 20_000, "analysis must have been interrupted"
+    assert state[0] > 0 or state[4] > 0, "must begin real analysis before interrupting"
+    assert state[1:4] == [False, False, False]
     assert handle.poll_autoanalysis()["complete"] is False
     assert handle.execute_python("6 * 7")["result"] == 42
 
@@ -588,9 +665,14 @@ def test_real_autoanalysis_last_close_cancels_and_saves(analysis_source, open_ha
     assert reopened.recovery == "none"
     assert reopened.instance.record_id != instance.record_id
     state = reopened.execute_python(
-        "import ida_auto, ida_funcs; [ida_funcs.get_func_qty(), ida_auto.auto_is_ok()]"
+        "import ida_auto, ida_ida, ida_funcs; "
+        "[ida_funcs.get_func_qty(), ida_auto.auto_is_ok(), "
+        "ida_auto.peek_auto_queue(0, ida_auto.AU_CODE) - ida_ida.inf_get_start_ea()]"
     )["result"]
-    assert 0 < state[0] <= 20_000
+    # The saved database carries the interrupted analysis: either some functions
+    # or a code queue head that has moved past the entry point.
+    assert state[0] < 20_000
+    assert state[0] > 0 or state[2] > 0, "saved database must show partial analysis"
     assert state[1] is False, "shutdown must not drain pending analysis"
     assert reopened.execute_python("6 * 7")["result"] == 42
 
@@ -792,3 +874,158 @@ def test_shutdown_waits_for_in_flight_real_idalib_open(
     assert shutdown_errors == []
     assert worker_instances
     assert wait_database_released(worker_instances[0], timeout=10)
+
+
+# ---------------------------------------------------------------- hosts
+
+
+def test_worker_runs_in_the_selected_host(source, open_handle, worker_host):
+    """idat puts the worker in IDA's own Python; idalib keeps this interpreter's."""
+    handle = open_handle(source)
+    assert handle.instance.backend == "idalib"
+    assert handle.instance.host == worker_host
+    listed = list_databases({"mine": handle.instance}, current="mine")["instances"]
+    assert [item["host"] for item in listed if item["instance_id"] == "mine"] == [
+        worker_host
+    ]
+    assert handle.execute_python(READ_NAME)["result"]
+
+
+def test_paths_with_spaces_reach_ida_unharmed(tmp_path, open_handle):
+    """Every host quotes for IDA differently; none may mangle a spaced path."""
+    folder = tmp_path / "input with spaces"
+    folder.mkdir()
+    source = Path(shutil.copyfile(SAMPLE, folder / SAMPLE.name))
+    output = tmp_path / "output dir" / "custom name.i64"
+    output.parent.mkdir()
+    handle = open_handle(source, output_database=str(output))
+    assert Path(handle.instance.idb_path) == output.resolve()
+    assert handle.execute_python(RENAME.format(name="spaced_name"))["result"] == (
+        "spaced_name"
+    )
+    instance = handle.instance
+    handle.close(wait_for_database=True, timeout=30)
+    assert wait_database_released(instance, timeout=0)
+    assert output.is_file()
+    # The saved database reopens, again through the spaced paths.
+    reopened = open_handle(source, output_database=str(output))
+    assert reopened.execute_python(READ_NAME)["result"] == "spaced_name"
+
+
+def test_missing_nexus_in_idas_python_fails_with_an_update_hint(
+    source, tmp_path, monkeypatch, worker_host, open_handle
+):
+    """No fallback: a plugin whose ida-nexus is missing or too old is reported."""
+    if worker_host != "idat":
+        pytest.skip("only the idat host runs inside IDA's Python")
+
+    # The client and embedded interpreters may have different minor versions.
+    # Query the running IDA rather than making a venv with pytest's Python.
+    handle = open_handle(source)
+    embedded = handle.execute_python(
+        "import os, sys; "
+        "{'base_prefix': sys.base_prefix, 'version': list(sys.version_info[:2]), "
+        "'windows': os.name == 'nt'}"
+    )["result"]
+    handle.close(wait_for_database=True, timeout=30)
+    base = Path(embedded["base_prefix"])
+    major, minor = embedded["version"]
+    interpreter = (
+        base / "python.exe"
+        if embedded["windows"]
+        else base / "bin" / f"python{major}.{minor}"
+    )
+    # IDA follows this documented binding; the matching venv has no ida-nexus.
+    empty = tmp_path / "empty-venv"
+    subprocess.run(
+        [str(interpreter), "-m", "venv", "--without-pip", "--copies", str(empty)],
+        # idalib mutates native PYTHONHOME without updating os.environ. Do not
+        # leak that hidden client-interpreter home into the different Python.
+        env=dict(os.environ),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    python = next(empty.glob("Scripts/python.exe"), None) or empty / "bin" / "python"
+    monkeypatch.setenv("IDAPYTHON_VENV_EXECUTABLE", str(python))
+    with pytest.raises(WorkerStartError) as error:
+        DatabaseHandle.open(
+            str(source), options=DatabaseOpenOptions(startup_timeout=60)
+        )
+    assert "missing or too old in IDA's Python" in str(error.value)
+    assert "hcli plugin update" in str(error.value)
+    assert probe_database_state(source)["state"] != "in_use"
+
+
+# ---------------------------------------------------------------- GUI
+
+
+@pytest.mark.gui_e2e
+def test_gui_open_starts_ida_and_other_clients_attach(source, worker_host):
+    """gui=True starts the IDA GUI, which the installed plugin registers.
+
+    The window stays open for the user: it is unmanaged, so closing the leases
+    leaves it running and the test shuts it down through IDA itself.
+    """
+    options = DatabaseOpenOptions(gui=True, startup_timeout=120)
+    if worker_host == "idalib":
+        with pytest.raises(DatabaseOpenError, match="IDA_NEXUS_IDALIB_ONLY"):
+            DatabaseHandle.open(str(source), options=options)
+        return
+
+    handle = DatabaseHandle.open(str(source), options=options)
+    instance = handle.instance
+    try:
+        assert instance.backend == "gui"
+        assert instance.host == "gui"
+        assert instance.managed is False
+        assert handle.execute_python("import ida_kernwin; ida_kernwin.is_idaq()")[
+            "result"
+        ]
+        # The bootstrap turns batch mode off again once IDA has run it, but the
+        # runtime switches batch mode on around every remote execution, so that
+        # cannot be observed from here; the bootstrap is covered by its own run.
+        assert handle.execute_python(RENAME.format(name="from_gui"))["result"] == (
+            "from_gui"
+        )
+        # Ordinary opens reuse the GUI instead of starting a worker.
+        other = DatabaseHandle.open(str(source))
+        try:
+            assert other.instance.record_id == instance.record_id
+            assert other.execute_python(READ_NAME)["result"] == "from_gui"
+        finally:
+            other.close()
+        handle.close()
+        assert not wait_database_released(instance, timeout=1), "GUI must stay open"
+        attached = DatabaseHandle.open(str(source))
+        try:
+            # Queue shutdown outside Nexus's timer callback. Batch mode must be
+            # enabled inside the queued request, after remote execution restores it.
+            attached.execute_python(
+                "import idc, ida_pro, ida_kernwin\n"
+                "def close_gui():\n"
+                "    idc.batch(1)\n"
+                "    ida_pro.qexit(0)\n"
+                "    return False\n"
+                "ida_kernwin.execute_ui_requests((close_gui,))\n"
+                "None"
+            )
+        except NexusConnectionError:
+            # The queued exit may close HTTP before this request's reply arrives.
+            # Native close and persisted contents below are the success criteria.
+            pass
+        finally:
+            attached.close()
+        assert wait_database_released(instance, timeout=60)
+    finally:
+        if not wait_database_released(instance, timeout=0):
+            os.kill(instance.pid, 9)
+            wait_database_released(instance, timeout=30)
+    assert probe_database_state(source)["state"] == "packed"
+    reopened = DatabaseHandle.open(str(source))
+    try:
+        assert reopened.execute_python(READ_NAME)["result"] == "from_gui"
+    finally:
+        reopened.close(wait_for_database=True, timeout=30)

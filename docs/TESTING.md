@@ -19,6 +19,35 @@ uv run pytest -m "not idalib_e2e"
 when IDA cannot start; they do not silently skip an installation problem.
 The old `IDA_NEXUS_RUN_IDALIB_E2E` opt-in is no longer needed.
 
+## Hosts
+
+Every real-IDA scenario runs twice: once with `idat` workers, once with idalib
+workers forced through `IDA_NEXUS_IDALIB_ONLY=1`. The `idat` runs need the
+ida-nexus (or ida-mcp) plugin installed for IDA, and IDA's Python must import
+this checkout rather than a released ida-nexus:
+
+```sh
+hcli ida python exec -- -m pip install -e .
+```
+
+`hcli ida python doctor` shows which interpreter that is (the one
+`idapyswitch` registered, or the virtualenv `IDAPYTHON_VENV_EXECUTABLE`
+names). An editable install reaches it through a `.pth` entry, which Python
+skips when the process starts inside this repository, so the e2e fixture runs
+IDA from a temporary directory.
+
+The client and IDA may use different Python minor versions. The missing-package
+scenario queries IDA's interpreter before creating its empty virtualenv.
+On macOS, an activated IDAPython venv can also make `sys.executable` name Python
+rather than `idat`; `instance.host` reports the host independently of that path.
+Nexus removes the client's `PYTHONHOME` and activated-venv settings when starting
+native IDA, while preserving `IDAPYTHON_VENV_EXECUTABLE`.
+
+`test_gui_open_starts_ida_and_other_clients_attach` carries the extra
+`gui_e2e` marker: it opens the IDA GUI on the desktop for a few seconds and
+closes it again through IDA's own UI queue; PySide6 is not required. Deselect it
+with `-m "not gui_e2e"` on a machine without a display.
+
 ## Coverage and the code flashlight
 
 The report generators and recorder live in the separate

@@ -22,6 +22,7 @@ from ida_nexus import (
 from ida_nexus._registry import (
     REGISTRY_DIR,
     SPAWN_DIR,
+    BackendName,
     DiscoveredDatabase,
     FileLock,
     InstanceIdentity,
@@ -45,7 +46,7 @@ def records(source):
 
         def create(
             *,
-            backend="idalib",
+            backend: BackendName = "idalib",
             state=InstanceState.READY,
             path=None,
             record_suffix=None,
@@ -53,7 +54,10 @@ def records(source):
             registration = InstanceRegistration(
                 REGISTRY_DIR,
                 InstanceIdentity(
-                    str(path or expected_idb_path(source)), str(source), backend
+                    str(path or expected_idb_path(source)),
+                    str(source),
+                    backend,
+                    host=backend,
                 ),
                 token="test-token",
                 record_suffix=record_suffix,
@@ -179,16 +183,17 @@ def test_failed_or_racing_crash_backup_never_starts_worker(
 
 
 def test_launcher_failure_reports_child_log_and_allows_retry(source, tmp_path):
-    log = tmp_path / "123-abcdef.log"
-    child_log = tmp_path / "456-abcdef.log"
-    child_log.write_text(
-        "IDA could not open database: loader failure", encoding="utf-8"
-    )
+    log = tmp_path / "abcdef.log"
+    log.write_text("IDA could not open database: loader failure", encoding="utf-8")
     calls = []
 
     def failed_spawn(*_args):
         calls.append(True)
-        return SimpleNamespace(pid=123, poll=lambda: 7), log
+        return resolver.SpawnedWorker(
+            Mock(spec=subprocess.Popen, pid=123, poll=Mock(return_value=7)),
+            log,
+            "abcdef",
+        )
 
     for _ in range(2):
         with pytest.raises(WorkerStartError, match="status 7") as error:
@@ -215,13 +220,16 @@ def test_await_ready_ignores_unrelated_record_with_same_pid(
     )
 
     result = resolver._await_ready(
-        Mock(
-            spec=subprocess.Popen,
-            pid=launched.instance.pid,
-            poll=Mock(return_value=None),
+        resolver.SpawnedWorker(
+            Mock(
+                spec=subprocess.Popen,
+                pid=launched.instance.pid,
+                poll=Mock(return_value=None),
+            ),
+            tmp_path / "abcdef.log",
+            "abcdef",
         ),
         expected_idb_path(source),
-        tmp_path / f"{launched.instance.record_id}.log",
         time.monotonic() + 1,
     )
 
@@ -235,9 +243,12 @@ def test_worker_ready_for_wrong_database_is_never_returned(
     monkeypatch.setattr(resolver, "_scan_until", lambda *_a, **_k: [wrong])
     with pytest.raises(WorkerStartError, match="expected"):
         resolver._await_ready(
-            Mock(spec=subprocess.Popen, pid=wrong.instance.pid),
+            resolver.SpawnedWorker(
+                Mock(spec=subprocess.Popen, pid=wrong.instance.pid),
+                tmp_path / "wrong.log",
+                wrong.instance.record_id.rsplit("-", 1)[-1],
+            ),
             str(source),
-            tmp_path / f"{wrong.instance.record_id}.log",
             time.monotonic() + 1,
         )
 
@@ -252,17 +263,20 @@ def test_startup_timeout_keeps_last_health_failure_and_log(
 
     unrelated = replace(unrelated, instance=replace(unrelated.instance, pid=999999))
     monkeypatch.setattr(resolver, "_scan_until", lambda *_a, **_k: [unrelated, blocked])
-    log = tmp_path / f"{blocked.instance.record_id}.log"
+    log = tmp_path / "blocked.log"
     log.write_text("waiting for analysis", encoding="utf-8")
     with pytest.raises(WorkerStartError, match="timed out") as error:
         resolver._await_ready(
-            Mock(
-                spec=subprocess.Popen,
-                pid=blocked.instance.pid,
-                poll=Mock(return_value=None),
+            resolver.SpawnedWorker(
+                Mock(
+                    spec=subprocess.Popen,
+                    pid=blocked.instance.pid,
+                    poll=Mock(return_value=None),
+                ),
+                log,
+                blocked.instance.record_id.rsplit("-", 1)[-1],
             ),
             expected_idb_path(source),
-            log,
             time.monotonic() + 0.03,
         )
     assert "owner is draining" in str(error.value)
@@ -279,6 +293,8 @@ def pinned_spawn(monkeypatch):
 
     monkeypatch.setattr(resolver.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(resolver, "_find_console_script", lambda _name: "ida-nexus")
+    # The host choice depends on the machine's IDA installation; pin it.
+    monkeypatch.setenv("IDA_NEXUS_IDALIB_ONLY", "1")
     return captured
 
 
@@ -333,4 +349,4 @@ def test_resolve_instance_hands_the_pin_to_the_spawner(source, monkeypatch):
             spawner=capture,
         )
     assert dict(seen["options"].worker_env) == {"HOME": "/tmp"}
-    assert seen["options"].worker_cwd == "/srv/work"
+    assert seen["options"].worker_cwd == str(Path("/srv/work"))
