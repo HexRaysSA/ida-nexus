@@ -11,17 +11,17 @@ from ._launch import (
     WorkerLaunchOptions,
     ida_command,
     ida_environment,
-    select_host,
+    select_backend,
     worker_command,
 )
 from ._registry import (
     DEFAULT_TIMEOUT,
     LOG_DIR,
     SPAWN_DIR,
+    BackendName,
     DatabaseInstance,
     DiscoveredDatabase,
     FileLock,
-    HostName,
     InstanceState,
     canonical_path,
     ensure_private_directory,
@@ -50,7 +50,7 @@ class SpawnedWorker:
     process: subprocess.Popen[bytes]
     log_path: Path
     record_suffix: str
-    host: HostName = "idalib"
+    backend: BackendName = "idalib"
 
 
 WorkerSpawner = Callable[
@@ -133,13 +133,13 @@ def spawn_worker(
 ) -> SpawnedWorker:
     """Start the IDA process that will own ``expected_idb``.
 
-    :func:`select_host` decides which executable runs. The idalib worker logs
+    :func:`select_backend` decides which executable runs. The idalib worker logs
     to ``logs/<suffix>.log`` itself; ``idat`` and ``ida`` are told to log there
     with ``-L`` unless the caller asked for its own IDA log file, which then
     doubles as the worker log.
     """
     options = options or WorkerLaunchOptions()
-    host, executable = select_host(gui=options.gui)
+    backend, executable = select_backend(gui=options.gui)
     suffix = os.urandom(3).hex()
     log_path = ensure_private_directory(LOG_DIR) / f"{suffix}.log"
     # Left out entirely when unset, so the worker keeps inheriting this
@@ -172,7 +172,7 @@ def spawn_worker(
             log_path = log_path.absolute()
         command = ida_command(
             executable,
-            host,
+            backend,
             source,
             expected_idb,
             lease_grace,
@@ -183,7 +183,7 @@ def spawn_worker(
         environment = ida_environment(
             options.worker_env if options.worker_env is not None else os.environ
         )
-        if host == "idat":
+        if backend == "idat":
             # IDA's text UI runs without a terminal only when told so.
             environment["TVHEADLESS"] = "1"
         else:
@@ -206,7 +206,7 @@ def spawn_worker(
         text=False,
         **popen_options,
     )
-    return SpawnedWorker(process, log_path, suffix, host)
+    return SpawnedWorker(process, log_path, suffix, backend)
 
 
 def _log_tail(path: Path, limit: int = 16 * 1024) -> str:
@@ -243,7 +243,7 @@ def _launcher_exit_is_fatal(returncode: int, platform: str) -> bool:
 def _await_ready(
     spawned: SpawnedWorker, expected_idb: str, deadline: float
 ) -> DatabaseInstance:
-    process, log_path, host = spawned.process, spawned.log_path, spawned.host
+    process, log_path, backend = spawned.process, spawned.log_path, spawned.backend
     expected_key = idb_key(expected_idb)
     # Launcher and worker PIDs may differ, and unrelated workers in different
     # PID namespaces may share a numeric PID. Only the random suffix passed
@@ -256,7 +256,7 @@ def _await_ready(
         now = time.monotonic()
         if now >= deadline:
             tail = _log_tail(log_path)
-            message = f"timed out waiting for {host} worker {process.pid}"
+            message = f"timed out waiting for {backend} worker {process.pid}"
             if last_detail:
                 message += f": {last_detail}"
             if tail:
@@ -276,7 +276,7 @@ def _await_ready(
         for instance in instances:
             entry = instance.instance
             launched_by_us = entry.record_id.endswith(f"-{record_suffix}") or (
-                host == "gui" and entry.pid == process.pid
+                backend == "gui" and entry.pid == process.pid
             )
             if not launched_by_us:
                 continue
@@ -298,10 +298,10 @@ def _await_ready(
         if (
             returncode is not None
             and not matched_record
-            and (host != "idalib" or _launcher_exit_is_fatal(returncode, os.name))
+            and (backend != "idalib" or _launcher_exit_is_fatal(returncode, os.name))
         ):
             tail = _log_tail(log_path)
-            message = f"{host} worker {process.pid} exited with status {returncode}"
+            message = f"{backend} worker {process.pid} exited with status {returncode}"
             if tail:
                 message += f"\n\n{tail}"
             raise WorkerStartError(message)

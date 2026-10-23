@@ -153,7 +153,6 @@ def main(argv: list[str] | None = None) -> int:
 
     session = NexusSession(
         backend="idalib",
-        host="idalib",
         managed=args.managed,
         record_suffix=suffix,
         lease_grace=args.lease_grace,

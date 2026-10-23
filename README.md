@@ -68,7 +68,12 @@ Below are a few scenarios enabled by the `ida-nexus` library:
 ### API
 
 `DatabaseHandle` is the primary API. One handle owns one lease on an exact GUI
-or idalib database; closing it releases only that lease.
+or idalib database; closing it releases only that lease. `close()` returns
+whether that was the final lease, in which case the managed worker saves and
+closes its IDB (finished on return with `wait_for_database=True`); the GUI is
+never closed. `DatabaseManager.close_database()` reports the same as
+`final_lease` together with the saved `idb_path`, so a caller can reopen the
+database elsewhere, for example in the GUI with `gui=True`.
 
 ```python
 from ida_nexus import DatabaseHandle, DatabaseOpenOptions

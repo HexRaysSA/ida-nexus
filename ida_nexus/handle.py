@@ -273,7 +273,7 @@ class DatabaseHandle:
         self.idle_timeout = (
             float(idle_timeout)
             if idle_timeout is not None
-            and instance.backend == "idalib"
+            and instance.backend != "gui"
             and instance.managed
             else None
         )
@@ -924,8 +924,15 @@ class DatabaseHandle:
         *,
         wait_for_database: bool = False,
         timeout: float = DATABASE_CLOSE_TIMEOUT_SECONDS,
-    ) -> None:
-        """Release this lease and optionally wait for a final managed IDB close."""
+    ) -> bool:
+        """Release this lease; return whether it was the final one.
+
+        True means no lease remains and the managed worker has committed to
+        saving and closing its IDB. With ``wait_for_database`` that close has
+        finished on return, so the saved database can be reopened at once,
+        for example in the GUI. The IDA GUI itself is never closed this way,
+        so a GUI lease always yields False.
+        """
 
         if not isinstance(wait_for_database, bool):
             raise TypeError("wait_for_database must be a boolean")
@@ -937,7 +944,7 @@ class DatabaseHandle:
         ):
             raise ValueError("timeout must be a finite non-negative number")
         if self._closed.is_set():
-            return
+            return False
         self._closed.set()
         with self._lock:
             subscriptions = tuple(self._idb_subscriptions)
@@ -998,6 +1005,7 @@ class DatabaseHandle:
             raise NexusConnectionError(
                 f"timed out after {float(timeout):g}s waiting for the IDB to close"
             )
+        return shutdown_pending
 
     def __enter__(self) -> Self:
         return self

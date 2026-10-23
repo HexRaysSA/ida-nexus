@@ -64,7 +64,6 @@ class _NexusPluginComponent:
 
         session = NexusSession(
             backend="gui",
-            host="gui",
             managed=False,
             unattributed_operation_label="IDA GUI",
             log=self.log,

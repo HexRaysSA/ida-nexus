@@ -20,7 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ._registry import REGISTRY_DIR, BackendName, HostName, InstanceIdentity
+from ._registry import REGISTRY_DIR, BackendName, InstanceIdentity
 from ._runtime import (
     AnalysisState,
     IDARuntime,
@@ -157,7 +157,6 @@ class NexusSession:
         self,
         *,
         backend: BackendName,
-        host: HostName,
         managed: bool,
         record_suffix: str | None = None,
         lease_grace: float = DEFAULT_LEASE_GRACE_SECONDS,
@@ -166,7 +165,6 @@ class NexusSession:
         log: Callable[[str], None] = _print_log,
     ) -> None:
         self.backend: BackendName = backend
-        self.host: HostName = host
         self.managed = managed
         self.record_suffix = record_suffix
         self.lease_grace = validate_lease_grace(lease_grace)
@@ -215,7 +213,6 @@ class NexusSession:
             exe_path=exe_path,
             backend=self.backend,
             managed=self.managed,
-            host=self.host,
         )
         runtime = IDARuntime(
             backend=self.backend,
@@ -305,8 +302,7 @@ def serve_headless(args: argparse.Namespace) -> int:
     kernwin: Any = ida_kernwin
     suffix = validate_record_suffix(args.record_suffix or os.urandom(3).hex())
     session = NexusSession(
-        backend="idalib",
-        host="idat",
+        backend="idat",
         managed=args.managed,
         record_suffix=suffix,
         lease_grace=args.lease_grace,

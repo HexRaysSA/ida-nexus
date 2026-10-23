@@ -21,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ._registry import HostName
+from ._registry import BackendName
 from .database_state import expected_idb_path, unpacked_database_paths
 from .errors import DatabaseOpenError
 from .paths import (
@@ -125,7 +125,7 @@ class WorkerLaunchOptions:
                 raise ValueError(f"unknown debug flags: {', '.join(unknown)}")
 
 
-def select_host(*, gui: bool) -> tuple[HostName, str | None]:
+def select_backend(*, gui: bool) -> tuple[BackendName, str | None]:
     """Decide which executable opens a new database, or fail with the reason.
 
     There is deliberately no fallback: a user who installed the plugin wants
@@ -383,7 +383,7 @@ def worker_command(
 
 def ida_command(
     executable: str,
-    host: HostName,
+    backend: BackendName,
     source: str,
     expected_idb: str,
     lease_grace: float,
@@ -407,7 +407,7 @@ def ida_command(
         script_switch(
             bootstrap,
             lifecycle_arguments(
-                managed=host != "gui",
+                managed=backend != "gui",
                 record_suffix=record_suffix,
                 lease_grace=lease_grace,
                 auto_analysis=options.auto_analysis,
@@ -417,7 +417,7 @@ def ida_command(
     )
     command.extend(
         ida_switches(
-            options, output_database=output_database, defer_analysis=host != "gui"
+            options, output_database=output_database, defer_analysis=backend != "gui"
         )
     )
     command.append(input_path)

@@ -47,7 +47,7 @@ db.functions.get_name(func)
 
 
 @pytest.fixture(params=["idat", "idalib"], autouse=True)
-def worker_host(request, monkeypatch, tmp_path: Path) -> str:
+def worker_backend(request, monkeypatch, tmp_path: Path) -> str:
     """Run every scenario once per headless host.
 
     ``idat`` is the default whenever the ida-nexus (or ida-mcp) plugin is
@@ -254,7 +254,7 @@ def test_process_clients_share_one_worker_and_persist_changes(
     observer = open_handle(source)
     instance = observer.instance
     assert instance.record_id == first_info["record_id"]
-    assert instance.backend == "idalib" and instance.managed
+    assert instance.backend == worker_backend and instance.managed
     assert [item.instance.record_id for item in discover_databases()] == [
         instance.record_id
     ]
@@ -409,6 +409,32 @@ def test_explicit_wait_enables_analysis_and_persists_to_saved_database(
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     assert reopened.returncode == 0, reopened.stdout + reopened.stderr
+
+
+def test_close_reports_the_final_lease_and_the_saved_database(
+    source, open_handle, worker_backend
+):
+    """A caller can tell when the worker is gone and where to reopen the IDB."""
+    first = open_handle(source)
+    second = DatabaseHandle.open(str(source))
+    assert second.instance.record_id == first.instance.record_id
+    assert second.close(wait_for_database=True, timeout=30) is False
+    assert first.connected
+    assert first.close(wait_for_database=True, timeout=30) is True
+    assert wait_database_released(first.instance, timeout=1)
+    saved = Path(first.instance.idb_path)
+    assert saved.is_file()
+
+    manager = DatabaseManager()
+    opened = manager.open_database(str(saved), set_current=True)
+    assert opened["backend"] == worker_backend
+    closed = manager.close_database(opened["instance_id"])
+    assert closed == {
+        "closed": True,
+        "final_lease": True,
+        "idb_path": first.instance.idb_path,
+    }
+    assert wait_database_released(first.instance, timeout=1)
 
 
 def test_current_ea_roundtrip(source, open_handle):
@@ -879,14 +905,13 @@ def test_shutdown_waits_for_in_flight_real_idalib_open(
 # ---------------------------------------------------------------- hosts
 
 
-def test_worker_runs_in_the_selected_host(source, open_handle, worker_host):
+def test_worker_runs_in_the_selected_host(source, open_handle, worker_backend):
     """idat puts the worker in IDA's own Python; idalib keeps this interpreter's."""
     handle = open_handle(source)
-    assert handle.instance.backend == "idalib"
-    assert handle.instance.host == worker_host
+    assert handle.instance.backend == worker_backend
     listed = list_databases({"mine": handle.instance}, current="mine")["instances"]
-    assert [item["host"] for item in listed if item["instance_id"] == "mine"] == [
-        worker_host
+    assert [item["backend"] for item in listed if item["instance_id"] == "mine"] == [
+        worker_backend
     ]
     assert handle.execute_python(READ_NAME)["result"]
 
@@ -913,10 +938,10 @@ def test_paths_with_spaces_reach_ida_unharmed(tmp_path, open_handle):
 
 
 def test_missing_nexus_in_idas_python_fails_with_an_update_hint(
-    source, tmp_path, monkeypatch, worker_host, open_handle
+    source, tmp_path, monkeypatch, worker_backend, open_handle
 ):
     """No fallback: a plugin whose ida-nexus is missing or too old is reported."""
-    if worker_host != "idat":
+    if worker_backend != "idat":
         pytest.skip("only the idat host runs inside IDA's Python")
 
     # The client and embedded interpreters may have different minor versions.
@@ -963,14 +988,14 @@ def test_missing_nexus_in_idas_python_fails_with_an_update_hint(
 
 
 @pytest.mark.gui_e2e
-def test_gui_open_starts_ida_and_other_clients_attach(source, worker_host):
+def test_gui_open_starts_ida_and_other_clients_attach(source, worker_backend):
     """gui=True starts the IDA GUI, which the installed plugin registers.
 
     The window stays open for the user: it is unmanaged, so closing the leases
     leaves it running and the test shuts it down through IDA itself.
     """
     options = DatabaseOpenOptions(gui=True, startup_timeout=120)
-    if worker_host == "idalib":
+    if worker_backend == "idalib":
         with pytest.raises(DatabaseOpenError, match="IDA_NEXUS_IDALIB_ONLY"):
             DatabaseHandle.open(str(source), options=options)
         return
@@ -979,7 +1004,6 @@ def test_gui_open_starts_ida_and_other_clients_attach(source, worker_host):
     instance = handle.instance
     try:
         assert instance.backend == "gui"
-        assert instance.host == "gui"
         assert instance.managed is False
         assert handle.execute_python("import ida_kernwin; ida_kernwin.is_idaq()")[
             "result"

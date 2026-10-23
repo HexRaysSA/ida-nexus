@@ -82,7 +82,6 @@ def list_databases(
             DatabaseListing(
                 path=reachable_path(instance),
                 backend=instance.backend,
-                host=instance.host,
                 status=status,
                 instance_id=name,
                 error=discovered.detail if status == "unavailable" else None,
@@ -94,7 +93,6 @@ def list_databases(
             DatabaseListing(
                 path=reachable_path(instance),
                 backend=instance.backend,
-                host=instance.host,
                 status="current" if name == current else "attached",
                 instance_id=name,
                 error=None,

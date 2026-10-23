@@ -15,6 +15,7 @@ import pytest
 import ida_nexus._resolver as resolver_mod
 import ida_nexus.handle as client_mod
 from ida_nexus import (
+    CloseDatabaseResult,
     DatabaseChangeSubscription,
     DatabaseDisconnectedError,
     DatabaseHandle,
@@ -171,7 +172,7 @@ def test_lifecycle_apis_reject_nonfinite_timeouts(tmp_path: Path) -> None:
 def test_find_gui_owner_checks_the_lifetime_lock(tmp_path: Path) -> None:
     registration = InstanceRegistration(
         tmp_path,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         token="token",
     )
     entry = registration.publish(12345)
@@ -188,7 +189,7 @@ def test_find_gui_owner_checks_the_lifetime_lock(tmp_path: Path) -> None:
 def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> None:
     registration = InstanceRegistration(
         tmp_path,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", host="idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib"),
         token="token",
     )
     entry = registration.publish(12345)
@@ -201,7 +202,7 @@ def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    ("health_host", "wrong_pid", "expected_state"),
+    ("health_backend", "wrong_pid", "expected_state"),
     [
         ("idat", False, InstanceState.READY),
         ("gui", False, InstanceState.BLOCKED),
@@ -209,9 +210,9 @@ def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> Non
         ("idat", True, InstanceState.BLOCKED),
     ],
 )
-def test_scan_requires_the_health_identity_to_match_including_host(
+def test_scan_requires_the_health_identity_to_match_including_backend(
     tmp_path: Path,
-    health_host: str | None,
+    health_backend: str | None,
     wrong_pid: bool,
     expected_state: InstanceState,
 ) -> None:
@@ -234,15 +235,15 @@ def test_scan_requires_the_health_identity_to_match_including_host(
     server = HTTPServer(("127.0.0.1", 0), HealthHandler)
     registration = InstanceRegistration(
         tmp_path,
-        InstanceIdentity("/tmp/idat.i64", "/tmp/idat", "idalib", host="idat"),
+        InstanceIdentity("/tmp/idat.i64", "/tmp/idat", "idat"),
         token="token",
     )
     entry = registration.publish(server.server_port)
     payload.update({"status": "ok", **entry.health_identity()})
-    if health_host is None:
-        payload.pop("host")
+    if health_backend is None:
+        payload.pop("backend")
     else:
-        payload["host"] = health_host
+        payload["backend"] = health_backend
     if wrong_pid:
         payload["pid"] += 1
     thread = threading.Thread(target=server.serve_forever)
@@ -257,7 +258,7 @@ def test_scan_requires_the_health_identity_to_match_including_host(
 
     assert len(discovered) == 1
     assert discovered[0].state is expected_state
-    assert discovered[0].instance.host == "idat"
+    assert discovered[0].instance.backend == "idat"
     if expected_state is InstanceState.BLOCKED:
         assert discovered[0].detail == (
             "health identity did not match the registry entry"
@@ -268,7 +269,7 @@ def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
     registry_dir = REGISTRY_DIR
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         AnalysisState(),
         registry_dir,
     )
@@ -300,7 +301,7 @@ def test_scan_accepts_additive_protocol_fields() -> None:
     registry_dir = REGISTRY_DIR
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         AnalysisState(),
         registry_dir,
     )
@@ -334,7 +335,6 @@ def test_resolver_timeout_is_shared_across_registry_probes(
                 f"/tmp/unrelated-{index}.i64",
                 f"/tmp/unrelated-{index}",
                 "gui",
-                host="gui",
             ),
             token=f"token-{index}",
         )
@@ -513,7 +513,7 @@ def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
         )
         server = NexusHTTPServer(
             StaticBackend(),
-            InstanceIdentity(expected_idb, source_path, "idalib", host="idalib"),
+            InstanceIdentity(expected_idb, source_path, "idalib"),
             AnalysisState(),
             REGISTRY_DIR,
         )
@@ -597,7 +597,7 @@ def test_handle_close_does_not_wait_for_sse_heartbeat(tmp_path: Path) -> None:
     registry_dir = REGISTRY_DIR
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(str(idb_path), str(executable), "gui", host="gui"),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
         registry_dir,
         heartbeat_interval=30.0,
@@ -628,7 +628,7 @@ def test_public_discovery_owner_and_release_api(tmp_path: Path) -> None:
     idb_path.write_bytes(b"idb")
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(str(idb_path), str(executable), "gui", host="gui"),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
         REGISTRY_DIR,
     )
@@ -654,7 +654,7 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
     funny_idb.write_bytes(b"idb")
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(str(funny_idb), str(executable), "gui", host="gui"),
+        InstanceIdentity(str(funny_idb), str(executable), "gui"),
         AnalysisState(),
         REGISTRY_DIR,
     )
@@ -720,7 +720,7 @@ def test_list_databases_does_not_wait_for_an_active_operation(
     backend = BlockingBackend()
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity(str(idb_path), "", "gui", host="gui"),
+        InstanceIdentity(str(idb_path), "", "gui"),
         AnalysisState(),
         REGISTRY_DIR,
     )
@@ -777,9 +777,7 @@ def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) 
     idb_path.write_bytes(b"idb")
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            str(idb_path), str(tmp_path / "missing.exe"), "gui", host="gui"
-        ),
+        InstanceIdentity(str(idb_path), str(tmp_path / "missing.exe"), "gui"),
         AnalysisState(),
         registry_dir,
     )
@@ -797,7 +795,6 @@ def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) 
             {
                 "path": entry.idb_path,
                 "backend": "gui",
-                "host": "gui",
                 "status": "available",
                 "instance_id": None,
                 "error": None,
@@ -814,7 +811,7 @@ def test_list_databases_prefers_existing_gui_executable(tmp_path: Path) -> None:
     executable.write_bytes(b"binary")
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(str(idb_path), str(executable), "gui", host="gui"),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
         registry_dir,
     )
@@ -849,7 +846,7 @@ def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) ->
     registry_dir = REGISTRY_DIR
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(str(idb_path), str(executable), "gui", host="gui"),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
         registry_dir,
     )
@@ -889,7 +886,7 @@ def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
     registry_dir = REGISTRY_DIR
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(str(idb_path), str(executable), "gui", host="gui"),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
         registry_dir,
     )
@@ -948,7 +945,6 @@ def test_shutdown_waits_for_in_flight_open_and_releases_handle(monkeypatch) -> N
         exe_path="/tmp/test",
         managed=False,
         started_at=0.0,
-        host="gui",
     )
 
     class SlowHandle:
@@ -1086,7 +1082,7 @@ def test_manager_execution_waits_for_autoanalysis_once_per_database(
     backend = RecordingBackend(analysis)
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity(str(idb_path), str(executable), "gui", host="gui"),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
         analysis,
         REGISTRY_DIR,
     )
@@ -1137,7 +1133,7 @@ def test_gui_disconnect_invalidates_manager_instance_without_spawning(
     executable.write_bytes(b"binary")
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(str(idb_path), str(executable), "gui", host="gui"),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
         registry_dir,
     )
@@ -1165,7 +1161,7 @@ def test_gui_disconnect_invalidates_manager_instance_without_spawning(
 def test_database_handle_reuses_http11_rpc_connection(tmp_path: Path) -> None:
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", host="idalib"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib"),
         AnalysisState(),
         REGISTRY_DIR,
     )
@@ -1461,7 +1457,7 @@ def test_native_startup_failure_reads_child_cwd_log(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(resolver_mod, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(
-        resolver_mod, "select_host", lambda **kwargs: ("idat", str(executable))
+        resolver_mod, "select_backend", lambda **kwargs: ("idat", str(executable))
     )
 
     spawned = resolver_mod.spawn_worker(
@@ -1493,9 +1489,7 @@ def test_await_ready_accepts_console_launcher_child_pid(tmp_path: Path) -> None:
     expected_idb = str(tmp_path / "sample.i64")
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            expected_idb, str(tmp_path / "sample"), "idalib", host="idalib"
-        ),
+        InstanceIdentity(expected_idb, str(tmp_path / "sample"), "idalib"),
         AnalysisState(),
         REGISTRY_DIR,
         record_suffix="abcdef",
@@ -1521,7 +1515,7 @@ def test_database_handle_attach_and_poll_use_exact_entry(tmp_path: Path) -> None
     analysis = AnalysisState()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         analysis,
         REGISTRY_DIR,
         heartbeat_interval=0.02,
@@ -1552,7 +1546,7 @@ def test_database_handle_exposes_closeable_idb_event_iterator(tmp_path: Path) ->
     backend = StaticBackend()
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         analysis,
         REGISTRY_DIR,
         heartbeat_interval=0.02,
@@ -1595,7 +1589,7 @@ def test_database_handle_closes_idb_event_iterators(tmp_path: Path) -> None:
     analysis.mark_complete()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         analysis,
         REGISTRY_DIR,
         heartbeat_interval=0.02,
@@ -1632,7 +1626,7 @@ def test_public_idb_event_subscription_closes_with_handle(tmp_path: Path) -> Non
     analysis.mark_complete()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         analysis,
         REGISTRY_DIR,
         heartbeat_interval=0.02,
@@ -1656,7 +1650,7 @@ def test_idb_event_iterator_reports_handle_disconnect(tmp_path: Path) -> None:
     analysis.mark_complete()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         analysis,
         REGISTRY_DIR,
         heartbeat_interval=0.02,
@@ -1693,9 +1687,7 @@ def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
     stopped = threading.Event()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            "/tmp/test.i64", "/tmp/test", "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=0.1,
@@ -1729,9 +1721,7 @@ def test_exclusive_managed_worker_can_shutdown_without_saving(tmp_path: Path) ->
     stopped = threading.Event()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            "/tmp/test.i64", "/tmp/test", "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -1756,9 +1746,7 @@ def test_exclusive_managed_worker_can_shutdown_without_saving(tmp_path: Path) ->
 def test_managed_worker_shutdown_rejects_another_lease(tmp_path: Path) -> None:
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            "/tmp/test.i64", "/tmp/test", "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -1785,9 +1773,7 @@ def test_final_explicit_release_skips_startup_grace(tmp_path: Path) -> None:
     stopped = threading.Event()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            "/tmp/test.i64", "/tmp/test", "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -1813,9 +1799,7 @@ def test_draining_owner_remains_discoverable_until_database_close(
     registry_dir = REGISTRY_DIR
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            str(idb), str(executable), "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
         registry_dir,
         lease_grace=30,
@@ -1864,9 +1848,7 @@ def test_handle_idle_timeout_disconnects_only_managed_workers(tmp_path: Path) ->
     stopped = threading.Event()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            "/tmp/test.i64", "/tmp/test", "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -1897,7 +1879,7 @@ def test_handle_idle_timeout_disconnects_only_managed_workers(tmp_path: Path) ->
 def test_handle_idle_timeout_is_ignored_for_gui(tmp_path: Path) -> None:
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         AnalysisState(),
         REGISTRY_DIR,
         heartbeat_interval=0.02,
@@ -1919,9 +1901,7 @@ def test_handle_keepalive_retains_idle_managed_worker(tmp_path: Path) -> None:
     stopped = threading.Event()
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            "/tmp/test.i64", "/tmp/test", "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -1961,7 +1941,7 @@ def test_operation_cancellation_cannot_reach_successor(tmp_path: Path) -> None:
     backend = HandoffBackend()
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui", host="gui"),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         AnalysisState(),
         REGISTRY_DIR,
     )
@@ -2056,9 +2036,7 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
     backend = CancellableBackend()
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity(
-            str(idb), str(executable), "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -2108,22 +2086,24 @@ def test_manager_close_waits_for_final_managed_idb_close(tmp_path: Path) -> None
 
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            str(idb), str(executable), "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
         on_shutdown=finish_shutdown,
     )
     server.start()
+    assert server.entry is not None
+    published_idb = server.entry.idb_path
     manager = DatabaseManager()
     opened = manager.open_database(str(idb), set_current=True)
+    assert opened["backend"] == "idalib"
     failures: list[Exception] = []
+    results: list[CloseDatabaseResult] = []
 
     def close_database() -> None:
         try:
-            manager.close_database(opened["instance_id"])
+            results.append(manager.close_database(opened["instance_id"]))
         except Exception as exc:  # noqa: BLE001 - asserted below
             failures.append(exc)
 
@@ -2136,8 +2116,58 @@ def test_manager_close_waits_for_final_managed_idb_close(tmp_path: Path) -> None
 
     assert not thread.is_alive()
     assert failures == []
+    # The IDB has finished closing, so the caller may reopen it right away.
+    assert results == [{"closed": True, "final_lease": True, "idb_path": published_idb}]
     server.stop()
     server.release_registration()
+
+
+def test_manager_close_reports_a_lease_that_was_not_the_last(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "test.exe"
+    idb = tmp_path / "test.i64"
+    executable.write_bytes(b"binary")
+    idb.write_bytes(b"idb")
+    shutdown_requested = threading.Event()
+
+    def finish_shutdown() -> None:
+        shutdown_requested.set()
+        server.release_registration()
+
+    server = NexusHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
+        AnalysisState(),
+        REGISTRY_DIR,
+        lease_grace=30,
+        on_shutdown=finish_shutdown,
+    )
+    server.start()
+    assert server.entry is not None
+    manager = DatabaseManager()
+    opened = manager.open_database(str(idb), set_current=True)
+    other = DatabaseHandle.open(str(idb))
+    try:
+        assert other.instance.record_id == server.entry.record_id
+
+        closed = manager.close_database(opened["instance_id"])
+
+        assert closed == {
+            "closed": True,
+            "final_lease": False,
+            "idb_path": server.entry.idb_path,
+        }
+        assert not shutdown_requested.is_set()
+        assert other.connected
+        # The surviving handle is the last one, and says so.
+        assert other.close(wait_for_database=True, timeout=5) is True
+        assert shutdown_requested.wait(1)
+        assert other.close() is False
+    finally:
+        other.close()
+        server.stop()
+        server.release_registration()
 
 
 def test_manager_shutdown_waits_for_final_managed_idb_close(tmp_path: Path) -> None:
@@ -2158,9 +2188,7 @@ def test_manager_shutdown_waits_for_final_managed_idb_close(tmp_path: Path) -> N
 
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            str(idb), str(executable), "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -2207,9 +2235,7 @@ def test_manager_shutdown_drains_databases_concurrently(tmp_path: Path) -> None:
 
         servers[name] = NexusHTTPServer(
             StaticBackend(),
-            InstanceIdentity(
-                str(idb), str(executable), "idalib", host="idalib", managed=True
-            ),
+            InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
             AnalysisState(),
             REGISTRY_DIR,
             lease_grace=30,
@@ -2252,9 +2278,7 @@ def test_manager_shutdown_reports_a_wedged_final_idb_close(tmp_path: Path) -> No
     idb.write_bytes(b"idb")
     server = NexusHTTPServer(
         StaticBackend(),
-        InstanceIdentity(
-            str(idb), str(executable), "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -2318,9 +2342,7 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
     backend = BlockingBackend()
     server = NexusHTTPServer(
         backend,
-        InstanceIdentity(
-            str(idb), str(executable), "idalib", host="idalib", managed=True
-        ),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
@@ -2433,13 +2455,11 @@ def test_listing_databases_is_one_implementation(monkeypatch) -> None:
         version=PROTOCOL_VERSION,
         managed=True,
         started_at=0.0,
-        host="idalib",
     )
     other = replace(
         entry,
         record_id="rec-2",
         backend="gui",
-        host="gui",
         idb_path="/w/other.i64",
         idb_key="k2",
         managed=False,
@@ -2477,7 +2497,6 @@ def test_a_lease_the_scan_missed_is_still_listed(monkeypatch) -> None:
         version=PROTOCOL_VERSION,
         managed=True,
         started_at=0.0,
-        host="idalib",
     )
     monkeypatch.setattr(
         "ida_nexus.instances.discover_databases", lambda _timeout=1.0: []
@@ -2487,7 +2506,6 @@ def test_a_lease_the_scan_missed_is_still_listed(monkeypatch) -> None:
         {
             "path": "/w/target.i64",
             "backend": "idalib",
-            "host": "idalib",
             "status": "attached",
             "instance_id": "mine",
             "error": None,

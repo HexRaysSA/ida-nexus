@@ -52,10 +52,9 @@ def _entry_target_fields(entry: DatabaseInstance) -> dict[str, Any]:
         "exe_path": entry.exe_path,
         "managed": entry.managed,
         "started_at": entry.started_at,
-        "host": entry.host,
         "worker_log_path": (
             str(LOG_DIR / f"{entry.record_id.rsplit('-', 1)[-1]}.log")
-            if entry.backend == "idalib"
+            if entry.backend != "gui"
             else None
         ),
     }
@@ -63,7 +62,7 @@ def _entry_target_fields(entry: DatabaseInstance) -> dict[str, Any]:
 
 class OpenDatabaseResult(TypedDict):
     instance_id: str
-    backend: Annotated[str, "Instance backend: gui or idalib."]
+    backend: Annotated[str, "IDA process serving it: gui, idalib, or idat."]
     status: Annotated[str, "Attachment state: attached or current."]
     recovery: Annotated[
         str,
@@ -82,6 +81,12 @@ class SaveDatabaseResult(TypedDict):
 
 class CloseDatabaseResult(TypedDict):
     closed: bool
+    final_lease: Annotated[
+        bool,
+        "Whether this was the last lease: the worker then saved and closed its "
+        "IDB before returning. Always false for the IDA GUI, which stays open.",
+    ]
+    idb_path: Annotated[str, "Path of the saved database, for reopening it."]
 
 
 @dataclass
@@ -532,13 +537,17 @@ class DatabaseManager:
         # Do not take the operation lock: releasing the lease asks the worker to
         # cancel orphaned execution. If this commits final managed shutdown,
         # wait for the lifetime lock released after the IDB has finished closing.
-        session.handle.close(wait_for_database=True)
+        final_lease = session.handle.close(wait_for_database=True)
         self._emit(
             "database_released",
             instance_id=target_id,
             target=database,
         )
-        return CloseDatabaseResult(closed=True)
+        return CloseDatabaseResult(
+            closed=True,
+            final_lease=final_lease,
+            idb_path=session.handle.instance.idb_path,
+        )
 
     def shutdown(self, *, timeout: float = DATABASE_CLOSE_TIMEOUT_SECONDS) -> None:
         """Release every handle and wait for final managed IDB closes.
