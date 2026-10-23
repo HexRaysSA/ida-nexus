@@ -980,7 +980,7 @@ def test_missing_nexus_in_idas_python_fails_with_an_update_hint(
             str(source), options=DatabaseOpenOptions(startup_timeout=60)
         )
     assert "missing or too old in IDA's Python" in str(error.value)
-    assert "hcli plugin update" in str(error.value)
+    assert "hcli plugin upgrade" in str(error.value)
     assert probe_database_state(source)["state"] != "in_use"
 
 

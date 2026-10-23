@@ -13,7 +13,7 @@ import idc
 
 UPDATE_HINT = (
     "[ida-nexus] ida-nexus is missing or too old in IDA's Python: {error}\n"
-    "[ida-nexus] Update the plugin: uvx ida-hcli plugin update ida-nexus "
+    "[ida-nexus] Update the plugin: uvx ida-hcli plugin upgrade ida-nexus "
     "(or ida-mcp), or set IDA_NEXUS_IDALIB_ONLY=1 to keep using idalib workers."
 )
 
