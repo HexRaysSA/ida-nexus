@@ -371,8 +371,9 @@ def reference(query: str) -> str:
         )
     if not entries and not examples:
         sections.append(
-            "No matching public API entries or examples were found. "
-            "Try a class, method, or concept such as functions, strings, imports, or xrefs."
+            "No matching ida-domain API entries or examples were found. "
+            "Try a class, method, or concept such as functions, strings, imports, or xrefs.\n"
+            "Note: regular IDAPython is also available via import."
         )
     return "\n\n".join(sections)
 

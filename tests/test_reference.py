@@ -107,7 +107,9 @@ def test_source_layouts_include_signatures_and_examples() -> None:
 
 @pytest.mark.usefixtures("source_package")
 def test_unmatched_word_does_not_match_identifier_substrings() -> None:
-    assert "No matching public API entries" in reference_module.reference("ref")
+    result = reference_module.reference("ref")
+    assert "No matching ida-domain API entries" in result
+    assert "Note: regular IDAPython is also available via import." in result
 
 
 @pytest.mark.usefixtures("source_package")
