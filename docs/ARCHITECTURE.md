@@ -473,6 +473,33 @@ also exists, unpacked components are durably copied to `<idb>.crash-*` before
 IDA restores the packed base. Indeterminate file states and live foreign owners
 fail closed.
 
+Failed startup extraction is discarded while the resolver still holds the spawn
+lock, but only if the pre-launch state was packed-only or crash leftovers were
+durably backed up immediately before this launch. The worker must have exited
+before native opening completed. Each launch carries a private cleanup guard in
+`IDA_NEXUS_STARTUP_GUARD`; idalib revokes it after successful native open, the
+native bootstrap revokes it before importing the installed package, and the GUI
+session revokes it before publication. The resolver removes any remaining guard
+when startup waiting ends. No guard means no automatic extraction cleanup.
+
+A failed readiness observation alone cannot authorize deletion: another client
+may have attached, changed the database, and crashed the worker before its
+creator observed READY. Registry records can also be reaped before that scan.
+Such post-open crash files must remain available for ordinary recovery.
+
+Cleanup classifies the leftovers under the native `.id0` exclusion and retains
+it through deletion, removing `.id0` last. It stops at the first removal error,
+preserving the lock-bearing component if another component remains. This avoids
+a probe-to-unlink race with an independently opened IDA. Repeated load failures
+therefore neither accumulate crash backups nor silently open partial extraction
+instead of the rejected packed base.
+
+Pre-existing clean unpacked databases, unbacked unpacked crashes, and live or
+indeterminate post-launch states are preserved. A timeout alone is not proof of
+exit; neither is a successful Windows console-launcher exit, because its worker
+child may still be running. `WorkerStartError` retains the startup diagnostic and
+appends the cleanup result, including any file that could not be removed.
+
 `flush_database=True` on `/execute_python` makes best-effort
 `ida_loader.flush_buffers()` calls inside the same IDA main-thread operation
 immediately before and after user code. The second flush runs when user code
@@ -502,7 +529,7 @@ of that state root but does not produce or interpret those session files.
 | Managed worker is killed | Lifetime lock releases; stale metadata is reaped on scan. |
 | Protocol version differs | Instance is `BLOCKED` before HTTP probing; no replacement is spawned. |
 | Health times out | Instance is `BLOCKED`; no replacement is spawned. |
-| Worker exits during startup | Resolver raises with process status and log tail. |
+| Worker exits during startup | Resolver raises with process status and log tail; safely redundant unpacked files are removed and the cleanup result is included. |
 | Worker begins idle shutdown before the first lease | The handle resolves and attempts attachment once more. |
 | GUI or worker disappears after opening | Its `instance_id` is invalidated; the next operation tells the agent to list and open again. |
 | RPC connection fails during a POST | The connection is discarded, but the operation is not retried because it may already have executed. |

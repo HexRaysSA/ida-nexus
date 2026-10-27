@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from .._launch import join_ida_switches
+from .._launch import _disarm_startup_cleanup, join_ida_switches
 from .._registry import LOG_DIR, ensure_private_directory
 from .._session import (
     NexusSession,
@@ -187,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         if status != 0:
             raise RuntimeError(f"idalib failed to open {input_path} (status {status})")
         opened = True
+        _disarm_startup_cleanup()
         phase = "initializing"
         _log_database_state("database.opened", input_path)
         if args.save_after_open:

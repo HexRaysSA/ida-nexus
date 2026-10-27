@@ -60,6 +60,15 @@ DEBUG_FLAGS = {
 }
 
 _COMPRESSION_SWITCHES = {"compress": "-P+", "pack": "-P", "no_pack": "-P-"}
+_STARTUP_GUARD_ENV = "IDA_NEXUS_STARTUP_GUARD"
+
+
+def _disarm_startup_cleanup() -> None:
+    """Revoke extraction cleanup before a successfully opened IDB is exposed."""
+    guard = os.environ.get(_STARTUP_GUARD_ENV)
+    if guard is not None:
+        Path(guard).unlink(missing_ok=True)
+        os.environ.pop(_STARTUP_GUARD_ENV, None)
 
 
 @dataclass(frozen=True)
