@@ -1,10 +1,12 @@
 """Safety gates before starting IDA; inject failures only at OS/race boundaries."""
 
+import json
+import os
 import subprocess
+import sys
 import time
 from contextlib import ExitStack
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -282,54 +284,58 @@ def test_startup_timeout_keeps_last_health_failure_and_log(
     assert "waiting for analysis" in str(error.value)
 
 
-def pinned_spawn(monkeypatch):
-    """Capture what `spawn_worker` would hand to the OS."""
-    captured = {}
-
-    def fake_popen(command, **kwargs):
-        captured.update(command=command, kwargs=kwargs)
-        return SimpleNamespace(pid=4321)
-
-    monkeypatch.setattr(resolver.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(resolver, "_find_console_script", lambda _name: "ida-nexus")
-    # The host choice depends on the machine's IDA installation; pin it.
+@pytest.mark.parametrize("pinned", [False, True])
+def test_launch_guard_preserves_worker_environment_and_directory_policy(
+    source, monkeypatch, tmp_path, pinned
+):
+    """Adding the private guard must not leak the parent's environment."""
     monkeypatch.setenv("IDA_NEXUS_IDALIB_ONLY", "1")
-    return captured
-
-
-def test_worker_environment_and_directory_reach_the_spawn(source, monkeypatch):
-    """A caller that must not leak its own environment can replace it.
-
-    The worker runs whatever `execute_python` is handed, so a host running
-    untrusted code needs its own environment to stop at the spawn rather than
-    be readable from inside IDA.
-    """
-    captured = pinned_spawn(monkeypatch)
-    resolver.spawn_worker(
+    monkeypatch.setenv("NEXUS_PARENT_SECRET", "do not leak")
+    monkeypatch.setattr(resolver, "_find_console_script", lambda _name: sys.executable)
+    report = tmp_path / "environment.json"
+    child_cwd = tmp_path / "child"
+    child_cwd.mkdir()
+    script = (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "from ida_nexus._launch import _STARTUP_GUARD_ENV, _disarm_startup_cleanup\n"
+        "guard = Path(os.environ[_STARTUP_GUARD_ENV])\n"
+        "assert guard.is_file()\n"
+        "_disarm_startup_cleanup()\n"
+        "assert not guard.exists()\n"
+        "Path(sys.argv[1]).write_text(json.dumps({\n"
+        " 'secret': os.environ.get('NEXUS_PARENT_SECRET'),\n"
+        " 'cwd': os.getcwd(), 'pinned': os.environ.get('NEXUS_PINNED')}))\n"
+    )
+    monkeypatch.setattr(
+        resolver,
+        "worker_command",
+        lambda *_a, **_k: [sys.executable, "-c", script, str(report)],
+    )
+    environment = {"NEXUS_PINNED": "yes"}
+    if "SYSTEMROOT" in os.environ:
+        environment["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    spawned = resolver.spawn_worker(
         str(source),
-        str(expected_idb_path(source)),
-        20.0,
+        expected_idb_path(source),
+        20,
         resolver.WorkerLaunchOptions(
-            worker_env={"PATH": "/bin"}, worker_cwd="/srv/work"
+            worker_env=environment if pinned else None,
+            worker_cwd=str(child_cwd) if pinned else None,
         ),
     )
-    assert captured["kwargs"]["env"] == {"PATH": "/bin"}
-    assert captured["kwargs"]["cwd"] == "/srv/work"
-    # Neither is an IDA import option, so neither becomes an argument.
-    assert not [argument for argument in captured["command"] if "/bin" in argument]
-
-
-def test_an_unpinned_spawn_still_inherits_this_process(source, monkeypatch):
-    """Leaving both unset must not start handing the worker an empty environment."""
-    captured = pinned_spawn(monkeypatch)
-    resolver.spawn_worker(
-        str(source),
-        str(expected_idb_path(source)),
-        20.0,
-        resolver.WorkerLaunchOptions(),
-    )
-    assert "env" not in captured["kwargs"]
-    assert "cwd" not in captured["kwargs"]
+    try:
+        assert spawned.process.wait(timeout=10) == 0
+        result = json.loads(report.read_text())
+        assert result["secret"] == (None if pinned else "do not leak")
+        assert result["pinned"] == ("yes" if pinned else None)
+        assert Path(result["cwd"]) == (child_cwd if pinned else Path.cwd()).resolve()
+    finally:
+        if spawned.process.poll() is None:
+            spawned.process.kill()
+            spawned.process.wait(timeout=10)
+        if spawned.startup_guard is not None:
+            spawned.startup_guard.unlink(missing_ok=True)
 
 
 def test_resolve_instance_hands_the_pin_to_the_spawner(source, monkeypatch):

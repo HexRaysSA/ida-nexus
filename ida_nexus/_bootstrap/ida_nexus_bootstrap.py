@@ -7,6 +7,8 @@ found in that Python; a missing or outdated install is reported in IDA's log
 and the process exits, so the client sees the reason instead of a timeout.
 """
 
+import os
+
 import ida_kernwin
 import ida_pro
 import idc
@@ -19,6 +21,20 @@ UPDATE_HINT = (
 
 
 def _main() -> None:
+    # Native opening has succeeded. Do this before importing the installed
+    # package: even a missing/broken Nexus plugin must not leave a usable GUI
+    # eligible for extraction cleanup if it later crashes.
+    guard = os.environ.get("IDA_NEXUS_STARTUP_GUARD")
+    if guard is not None:
+        try:
+            os.unlink(guard)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            print(f"[ida-nexus] cannot revoke startup cleanup: {error}", flush=True)
+            ida_pro.qexit(1)
+            return
+        os.environ.pop("IDA_NEXUS_STARTUP_GUARD", None)
     try:
         from ida_nexus._session import run_bootstrap
     except Exception as error:  # noqa: BLE001 -- report any import failure

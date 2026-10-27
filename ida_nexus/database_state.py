@@ -9,6 +9,8 @@ import shutil
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -154,30 +156,39 @@ def _network_filesystem(path: Path) -> bool | None:
     return None
 
 
-def _read_posix_header(path: Path) -> tuple[bool | None, bytes | None, str | None]:
+@contextmanager
+def _locked_posix_header(
+    path: Path,
+) -> Iterator[tuple[bool | None, bytes | None, str | None]]:
     import fcntl
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     try:
         fd = os.open(path, flags)
     except OSError as error:
-        return None, None, str(error)
+        yield None, None, str(error)
+        return
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
             if error.errno in {errno.EACCES, errno.EAGAIN}:
-                return True, None, None
-            return None, None, str(error)
+                yield True, None, None
+            else:
+                yield None, None, str(error)
+            return
         try:
-            return False, os.read(fd, _B_TREE_HEADER_SIZE), None
+            yield False, os.read(fd, _B_TREE_HEADER_SIZE), None
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
 
 
-def _read_windows_header(path: Path) -> tuple[bool | None, bytes | None, str | None]:
+@contextmanager
+def _locked_windows_header(
+    path: Path,
+) -> Iterator[tuple[bool | None, bytes | None, str | None]]:
     if os.name != "nt":
         raise RuntimeError("Windows database header reader requires Windows")
     from ctypes import wintypes
@@ -215,8 +226,10 @@ def _read_windows_header(path: Path) -> tuple[bool | None, bytes | None, str | N
     if handle == invalid_handle:
         error_code = get_last_error()
         if error_code == sharing_violation:
-            return True, None, None
-        return None, None, f"CreateFileW failed with Windows error {error_code}"
+            yield True, None, None
+        else:
+            yield None, None, f"CreateFileW failed with Windows error {error_code}"
+        return
 
     try:
         buffer = ctypes.create_string_buffer(_B_TREE_HEADER_SIZE)
@@ -232,8 +245,9 @@ def _read_windows_header(path: Path) -> tuple[bool | None, bytes | None, str | N
         read_file.restype = wintypes.BOOL
         if not read_file(handle, buffer, len(buffer), ctypes.byref(read), None):
             error_code = get_last_error()
-            return None, None, f"ReadFile failed with Windows error {error_code}"
-        return False, buffer.raw[: read.value], None
+            yield None, None, f"ReadFile failed with Windows error {error_code}"
+            return
+        yield False, buffer.raw[: read.value], None
     finally:
         close_handle = kernel32.CloseHandle
         close_handle.argtypes = (wintypes.HANDLE,)
@@ -241,17 +255,20 @@ def _read_windows_header(path: Path) -> tuple[bool | None, bytes | None, str | N
         close_handle(handle)
 
 
-def _read_unlocked_header(
+@contextmanager
+def _locked_unpacked_header(
     path: Path,
-) -> tuple[bool | None, bytes | None, str | None]:
+) -> Iterator[tuple[bool | None, bytes | None, str | None]]:
     if os.name == "nt":
-        return _read_windows_header(path)
+        with _locked_windows_header(path) as result:
+            yield result
+        return
     # flock locks belong to open file descriptions, not Python threads. An RPC
     # failure and SSE disconnect can probe concurrently and mistake our own
     # exclusive reader lock for a live IDA owner. Serialize local readers while
     # retaining the nonblocking exclusive OS probe against external owners.
-    with _POSIX_PROBE_LOCK:
-        return _read_posix_header(path)
+    with _POSIX_PROBE_LOCK, _locked_posix_header(path) as result:
+        yield result
 
 
 def _backup_unpacked_database(state: DatabaseFileState) -> str:
@@ -281,19 +298,13 @@ def _backup_unpacked_database(state: DatabaseFileState) -> str:
     return str(backup)
 
 
-def probe_database_state(
+@contextmanager
+def _locked_database_state(
     path: str | os.PathLike[str],
     *,
     output_database: str | os.PathLike[str] | None = None,
-) -> DatabaseFileState:
-    """Classify an IDB as packed, live, crashed, clean-unpacked, or unknown.
-
-    The ``.id0`` lock is authoritative for a live local session. The B-tree
-    ``isTreeOpen`` byte is read only while the probe owns the lock and therefore
-    distinguishes crash leftovers from a deliberately unpacked clean database.
-    Advisory locks may be unreliable on network filesystems; callers must treat
-    an unlocked result on such storage as untrusted.
-    """
+) -> Iterator[DatabaseFileState]:
+    """Inspect the state, retaining native-file exclusion until the caller exits."""
 
     requested = canonical_path(path)
     idb_path = (
@@ -319,37 +330,81 @@ def probe_database_state(
     if not id0_path.exists():
         if existing:
             common["error"] = "unpacked database components exist without .id0"
-            return common
-        common["state"] = "packed" if packed_exists else "missing"
-        return common
+        else:
+            common["state"] = "packed" if packed_exists else "missing"
+        yield common
+        return
 
     if _network_filesystem(id0_path) is True:
         common["error"] = (
             "database is on a network filesystem where file locks are not reliable"
         )
-        return common
+        yield common
+        return
 
-    locked, header, error = _read_unlocked_header(id0_path)
-    if locked is True:
-        common["state"] = "in_use"
-        return common
-    if locked is None or header is None:
-        common["error"] = error or "could not inspect .id0"
-        return common
-    if len(header) < _B_TREE_HEADER_SIZE:
-        common["error"] = "the .id0 B-tree header is truncated"
-        return common
-    if header[_B_TREE_SIGNATURE_OFFSET:_B_TREE_HEADER_SIZE] != _B_TREE_SIGNATURE:
-        common["error"] = "the .id0 B-tree signature is invalid"
-        return common
+    with _locked_unpacked_header(id0_path) as (locked, header, error):
+        if locked is True:
+            common["state"] = "in_use"
+        elif locked is None or header is None:
+            common["error"] = error or "could not inspect .id0"
+        elif len(header) < _B_TREE_HEADER_SIZE:
+            common["error"] = "the .id0 B-tree header is truncated"
+        elif header[_B_TREE_SIGNATURE_OFFSET:_B_TREE_HEADER_SIZE] != _B_TREE_SIGNATURE:
+            common["error"] = "the .id0 B-tree signature is invalid"
+        else:
+            dirty_byte = header[_B_TREE_DIRTY_OFFSET]
+            if dirty_byte not in (0, 1):
+                common["error"] = (
+                    f"the .id0 isTreeOpen byte has invalid value {dirty_byte}"
+                )
+            else:
+                common["dirty"] = bool(dirty_byte)
+                common["state"] = "crashed" if dirty_byte else "unpacked"
+        yield common
 
-    dirty_byte = header[_B_TREE_DIRTY_OFFSET]
-    if dirty_byte not in (0, 1):
-        common["error"] = f"the .id0 isTreeOpen byte has invalid value {dirty_byte}"
-        return common
-    common["dirty"] = bool(dirty_byte)
-    common["state"] = "crashed" if dirty_byte else "unpacked"
-    return common
+
+def probe_database_state(
+    path: str | os.PathLike[str],
+    *,
+    output_database: str | os.PathLike[str] | None = None,
+) -> DatabaseFileState:
+    """Classify an IDB as packed, live, crashed, clean-unpacked, or unknown.
+
+    The ``.id0`` lock is authoritative for a live local session. The B-tree
+    ``isTreeOpen`` byte is read only while the probe owns the lock and therefore
+    distinguishes crash leftovers from a deliberately unpacked clean database.
+    Advisory locks may be unreliable on network filesystems; callers must treat
+    an unlocked result on such storage as untrusted.
+    """
+    with _locked_database_state(path, output_database=output_database) as state:
+        return state
+
+
+def _discard_failed_launch_extraction(source: str, expected_idb: str) -> str:
+    """Discard extraction only after a guarded launch failed before native open.
+
+    The caller must establish final process exit and preservation of pre-launch
+    data in a packed base or crash backup. Keep .id0 locked until all components
+    are removed; unlink it last so another IDA cannot acquire it mid-cleanup.
+    """
+    with _locked_database_state(source, output_database=expected_idb) as state:
+        if state["state"] not in {"crashed", "unpacked"}:
+            return ""
+        removed = 0
+        failure = ""
+        for component in reversed(state["unpacked_files"]):
+            try:
+                os.remove(component)
+            except OSError as error:
+                failure = f" Could not remove {component}: {error}"
+                # Retain .id0 if another component could not be removed.
+                break
+            else:
+                removed += 1
+        return (
+            f"Removed {removed} unpacked database files left by the failed worker "
+            f"next to {expected_idb}.{failure}"
+        )
 
 
 __all__ = [

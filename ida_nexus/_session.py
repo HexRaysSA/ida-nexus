@@ -20,6 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ._launch import _disarm_startup_cleanup
 from ._registry import REGISTRY_DIR, BackendName, InstanceIdentity
 from ._runtime import (
     AnalysisState,
@@ -199,6 +200,9 @@ class NexusSession:
 
     def start(self, *, autoanalysis: bool) -> NexusHTTPServer:
         """Attach to the open database, publish it, and optionally analyze it."""
+        # A GUI plugin can publish before its bootstrap runs. Revoke cleanup
+        # before any client can attach, independently of the creator's scan.
+        _disarm_startup_cleanup()
         if self.server is not None:
             return self.server
         _prepare_ida_domain()

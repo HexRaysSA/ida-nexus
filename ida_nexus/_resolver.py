@@ -1,13 +1,16 @@
 import math
 import os
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypedDict
 
 from ._launch import (
+    _STARTUP_GUARD_ENV,
     WorkerLaunchOptions,
     ida_command,
     ida_environment,
@@ -30,6 +33,7 @@ from ._registry import (
 )
 from .database_state import (
     _backup_unpacked_database,
+    _discard_failed_launch_extraction,
     expected_idb_path,
     probe_database_state,
 )
@@ -51,6 +55,7 @@ class SpawnedWorker:
     log_path: Path
     record_suffix: str
     backend: BackendName = "idalib"
+    startup_guard: Path | None = None
 
 
 WorkerSpawner = Callable[
@@ -142,8 +147,8 @@ def spawn_worker(
     backend, executable = select_backend(gui=options.gui)
     suffix = os.urandom(3).hex()
     log_path = ensure_private_directory(LOG_DIR) / f"{suffix}.log"
-    # Left out entirely when unset, so the worker keeps inheriting this
-    # process as it always has.
+    # Preserve the caller's environment selection; add only the private
+    # launch guard below, after host-specific environment preparation.
     spawn_environment: _SpawnEnvironment = {}
     if options.worker_env is not None:
         spawn_environment["env"] = dict(options.worker_env)
@@ -198,15 +203,30 @@ def spawn_worker(
         popen_options["creationflags"] = creationflags
     else:
         popen_options["start_new_session"] = True
-    process: Any = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=False,
-        **popen_options,
+    fd, guard_name = tempfile.mkstemp(
+        prefix=f"{suffix}-", suffix=".startup", dir=ensure_private_directory(SPAWN_DIR)
     )
-    return SpawnedWorker(process, log_path, suffix, backend)
+    os.close(fd)
+    startup_guard = Path(guard_name)
+    environment = popen_options.get("env")
+    if environment is None:
+        environment = dict(os.environ)
+        popen_options["env"] = environment
+    environment[_STARTUP_GUARD_ENV] = str(startup_guard)
+    try:
+        process: Any = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=False,
+            **popen_options,
+        )
+    except BaseException:
+        with suppress(OSError):
+            startup_guard.unlink(missing_ok=True)
+        raise
+    return SpawnedWorker(process, log_path, suffix, backend, startup_guard)
 
 
 def _log_tail(path: Path, limit: int = 16 * 1024) -> str:
@@ -449,6 +469,7 @@ def resolve_instance(
                     "cannot automatically recover an unpacked database at a custom "
                     f"output path: {expected_idb}"
                 )
+        discard_failed_extraction = file_state["state"] == "packed"
         if file_state["state"] == "crashed":
             if new_database or file_state["packed_database_exists"]:
                 try:
@@ -457,6 +478,7 @@ def resolve_instance(
                     raise DatabaseOpenError(
                         f"failed to preserve crashed database files: {error}"
                     ) from error
+                discard_failed_extraction = True
                 after_backup = probe_database_state(
                     source,
                     output_database=expected_idb,
@@ -477,6 +499,32 @@ def resolve_instance(
         if remaining <= 0:
             raise TimeoutError(f"timed out resolving {expected_idb}")
         spawned = spawner(source, expected_idb, lease_grace, launch_options)
-        return _await_ready(spawned, expected_idb, deadline)
+        try:
+            return _await_ready(spawned, expected_idb, deadline)
+        except WorkerStartError as error:
+            # A failed readiness observation does not prove the worker never
+            # served a peer. The host revokes this guard before exposing an IDB.
+            if (
+                not discard_failed_extraction
+                or spawned.startup_guard is None
+                or not spawned.startup_guard.is_file()
+            ):
+                raise
+            returncode = spawned.process.poll()
+            # A successful Windows console launcher may leave a worker child
+            # running. As in _await_ready, only a final exit permits cleanup.
+            if returncode is None or (
+                spawned.backend == "idalib"
+                and not _launcher_exit_is_fatal(returncode, os.name)
+            ):
+                raise
+            note = _discard_failed_launch_extraction(source, expected_idb)
+            if not note:
+                raise
+            raise WorkerStartError(f"{error}\n\n{note}") from error
+        finally:
+            if spawned.startup_guard is not None:
+                with suppress(OSError):
+                    spawned.startup_guard.unlink(missing_ok=True)
     finally:
         spawn_lock.close()

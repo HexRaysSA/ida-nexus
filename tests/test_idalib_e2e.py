@@ -647,6 +647,86 @@ def test_worker_crash_invalidates_handle_and_recovers_database(
         assert backups == []
 
 
+def test_peer_crash_before_creator_observes_ready_preserves_new_work(
+    source, open_handle, monkeypatch
+):
+    import ida_nexus._resolver as resolver
+
+    original = open_handle(source)
+    original.wait_autoanalysis(timeout=60)
+    original.close(wait_for_database=True, timeout=30)
+    idb = Path(original.instance.idb_path)
+    scan = resolver._scan_until
+    awaiting = threading.Event()
+    resume = threading.Event()
+    creator_thread = None
+    scans = 0
+
+    def delayed_scan(*args, **kwargs):
+        nonlocal scans
+        if threading.get_ident() == creator_thread:
+            scans += 1
+            if scans == 3:
+                awaiting.set()
+                assert resume.wait(30)
+        return scan(*args, **kwargs)
+
+    def create_worker():
+        nonlocal creator_thread
+        creator_thread = threading.get_ident()
+        with pytest.raises(WorkerStartError):
+            resolver.resolve_instance(idb, timeout=60)
+
+    monkeypatch.setattr(resolver, "_scan_until", delayed_scan)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        creating = pool.submit(create_worker)
+        try:
+            assert awaiting.wait(10)
+            wait_until(lambda: find_database_owner(idb) is not None)
+            peer = open_handle(idb)
+            peer.execute_python(
+                RENAME.format(name="NEXUS_PEER_WORK"), flush_database=True
+            )
+            with pytest.raises(DatabaseCrashedError):
+                peer.execute_python("import os; os._exit(77)", timeout=10)
+            before = probe_database_state(idb)
+            assert before["state"] == "crashed"
+            components = {
+                path: Path(path).read_bytes() for path in before["unpacked_files"]
+            }
+            # Reap the dead registry record before the creator ever sees it.
+            assert find_database_owner(idb) is None
+        finally:
+            resume.set()
+        creating.result(timeout=10)
+
+    assert probe_database_state(idb)["state"] == "crashed"
+    assert {path: Path(path).read_bytes() for path in components} == components
+    # With the old packed snapshot removed, native repair must recover the
+    # peer's flushed work, not merely retain arbitrary leftover files.
+    idb.unlink()
+    recovered = open_handle(source)
+    assert recovered.execute_python(READ_NAME)["result"] == "NEXUS_PEER_WORK"
+
+
+def test_rejected_packed_database_retries_leave_no_extraction(source, open_handle):
+    original = open_handle(source)
+    original.wait_autoanalysis(timeout=60)
+    original.close(wait_for_database=True, timeout=30)
+    idb = Path(original.instance.idb_path)
+    damaged = idb.read_bytes()[:-64]
+    idb.write_bytes(damaged)
+
+    for _ in range(3):
+        with pytest.raises(WorkerStartError, match="corrupted"):
+            open_handle(idb)
+        state = probe_database_state(idb)
+        assert state["state"] == "packed"
+        assert state["unpacked_files"] == []
+        assert idb.read_bytes() == damaged
+        assert list(source.parent.glob("*.i64.crash-*")) == []
+
+
 @pytest.mark.parametrize("interrupt", ["cancel", "timeout"])
 def test_real_autoanalysis_interrupt_preserves_worker(
     analysis_source, open_handle, interrupt
