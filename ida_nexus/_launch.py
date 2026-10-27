@@ -398,9 +398,15 @@ def ida_command(
     ``-A`` keeps load-time dialogs away; the bootstrap turns batch mode off again
     in the GUI. IDA logs to ``log_path`` unless the caller asked for its own
     kernel log, which then doubles as the worker log.
+
+    ``-A`` also disables the indexer for the whole session, and clearing batch
+    mode later does not bring it back, so the GUI forces it on to keep Jump
+    Anywhere working.
     """
     input_path, options, output_database = plan_input(source, expected_idb, options)
     command = [executable, "-A"]
+    if backend == "gui":
+        command.append("-dENABLE_INDEXER=YES")
     if not options.log_file:
         command.append(f"-L{log_path}")
     command.append(

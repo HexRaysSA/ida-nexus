@@ -312,6 +312,7 @@ def test_gui_command_is_unmanaged_and_lets_ida_analyze(tmp_path):
     assert command == [
         "/opt/ida/ida",
         "-A",
+        "-dENABLE_INDEXER=YES",
         "-S/opt/nexus/boot.py --record-suffix abcdef --lease-grace 20.0 --auto-analysis",
         "-L/tmp/mine.log",
         "-R",
