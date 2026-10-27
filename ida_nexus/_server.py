@@ -113,7 +113,7 @@ class NexusHTTPServer:
         self._active_leases = 0
         self._active_requests = 0
         self._leases: dict[str, _Lease] = {}
-        self._shutdown_at: float | None = time.monotonic() + self.lease_grace
+        self._shutdown_at: float | None = None
         self._backend_lock = threading.Lock()
         # Foreground operations announce their intent before contending for the
         # backend lock. The analysis scheduler then yields deterministically
@@ -155,7 +155,7 @@ class NexusHTTPServer:
             self._shutdown_requested = False
             self._save_on_shutdown = True
             self._stream_stop.clear()
-            self._shutdown_at = time.monotonic() + self.lease_grace
+            self._shutdown_at = None
             registration = InstanceRegistration(
                 self.registry_dir,
                 self.identity,
@@ -179,13 +179,25 @@ class NexusHTTPServer:
             if not serving.wait(timeout=2.0) or not thread.is_alive():
                 raise RuntimeError("HTTP server thread did not start")
             self._entry = registration.publish(httpd.port)
-            if self.identity.managed:
-                watchdog = threading.Thread(
-                    target=self._watch_leases,
-                    name="ida-nexus-leases",
-                    daemon=True,
-                )
-                self._watchdog = watchdog
+            watchdog = None
+            with self._lock:
+                if self._httpd is None:
+                    return
+                if self.identity.managed and self._watchdog is None:
+                    watchdog = threading.Thread(
+                        target=self._watch_leases,
+                        name="ida-nexus-leases",
+                        daemon=True,
+                    )
+                    self._watchdog = watchdog
+            with self._activity:
+                if (
+                    self._shutdown_at is None
+                    and self._active_leases == 0
+                    and not self._shutdown_requested
+                ):
+                    self._shutdown_at = time.monotonic() + self.lease_grace
+            if watchdog is not None:
                 watchdog.start()
         except Exception:
             self.stop()
