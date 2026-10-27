@@ -231,6 +231,7 @@ useful for deterministic error cases, but does not replace real IDA file tests.
 | Worker death with a packed base | Reopening restores saved contents; the dirty unpacked files are backed up byte-for-byte; the failed request is not replayed. |
 | Timeout and cancellation | Real Python loops terminate with the expected errors; the same worker executes subsequent requests successfully. |
 | Autoanalysis cancellation and timeout | A generated 20,000-function ELF exercises native IDA analysis without Python hooks or mocks. Explicit cancellation and a deadline interrupt the drain while queues remain pending, restore analysis settings, and leave the worker usable; a subsequent wait completes all functions. |
+| Work queued during analysis finalization | An `auto_empty_finally` hook queues real analysis work. The first explicit wait drains it without a false cancellation, confirms empty queues, and leaves runtime/persistent analysis enabled. |
 | Final release during autoanalysis | Closing the last lease interrupts an in-flight drain, releases the worker promptly, and saves a clean IDB with pending analysis that reopens without recovery. |
 | User Python failure | Both ordinary exceptions and `SystemExit` return structured errors; the writer and peer remain usable; a prior rename survives save and reopen. |
 | Custom output and fresh replacement | Saved contents reopen at the chosen IDB path despite supplied import options; fresh creation is rejected while owned, then replaces the saved database from the input after release. |

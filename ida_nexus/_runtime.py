@@ -964,6 +964,7 @@ class IDARuntime:
         import ida_auto
         import ida_ida
         import ida_idaapi
+        import ida_kernwin
 
         def wait() -> bool:
             previously_persistent = ida_ida.inf_is_auto_enabled()
@@ -975,14 +976,19 @@ class IDARuntime:
                 # instead of injecting an exception into state-restoring cleanup.
                 while True:
                     more = ida_auto.auto_make_step(0, ida_idaapi.BADADDR)
+                    # This can dispatch GUI events; read the operation error
+                    # afterward so its specific timeout/cancel reason wins.
+                    cancelled = ida_kernwin.user_cancelled()
                     with self._active_lock:
                         error = self._active_interrupt_error
                     if error is not None:
                         raise error
-                    if not more:
+                    if cancelled:
+                        return False
+                    # Finalization callbacks can queue work even when the
+                    # native step returns False. Pending work is not cancellation.
+                    if not more and ida_auto.auto_is_ok():
                         break
-                if not ida_auto.auto_is_ok():
-                    return False
                 # An explicit successful wait opts into normal ongoing analysis,
                 # including when startup slices already completed the barrier.
                 ida_ida.inf_set_auto_enabled(True)
