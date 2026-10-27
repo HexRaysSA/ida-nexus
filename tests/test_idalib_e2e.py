@@ -411,6 +411,39 @@ def test_explicit_wait_enables_analysis_and_persists_to_saved_database(
     assert reopened.returncode == 0, reopened.stdout + reopened.stderr
 
 
+def test_explicit_wait_drains_work_queued_by_analysis_completion(source, open_handle):
+    handle = open_handle(source, auto_analysis=False)
+    handle.execute_python(
+        """
+import ida_auto, ida_ida, ida_idp
+
+class QueueAfterCompletion(ida_idp.IDB_Hooks):
+    queued = False
+
+    def auto_empty_finally(self):
+        ea = ida_ida.inf_get_start_ea()
+        ida_auto.auto_mark_range(ea, ea + 1, ida_auto.AU_USED)
+        self.queued = ida_auto.peek_auto_queue(0, ida_auto.AU_USED) == ea
+
+completion_hook = QueueAfterCompletion()
+assert completion_hook.hook()
+""",
+        persist_globals=True,
+    )
+    try:
+        assert handle.wait_autoanalysis(timeout=60) == {
+            "status": "complete",
+            "complete": True,
+        }
+        assert handle.execute_python(
+            "[completion_hook.queued, ida_auto.auto_is_ok(), "
+            "ida_auto.is_auto_enabled(), ida_ida.inf_is_auto_enabled()]",
+            persist_globals=True,
+        )["result"] == [True, True, True, True]
+    finally:
+        handle.execute_python("completion_hook.unhook()", persist_globals=True)
+
+
 def test_close_reports_the_final_lease_and_the_saved_database(
     source, open_handle, worker_backend
 ):

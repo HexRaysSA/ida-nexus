@@ -578,7 +578,7 @@ def test_autoanalysis_completion_check_runs_on_ida_thread(
 @pytest.fixture
 def waiting_runtime(gui_runtime, monkeypatch):
     runtime, _, _ = gui_runtime
-    flags = SimpleNamespace(enabled=False, persistent=False, steps=0)
+    flags = SimpleNamespace(enabled=False, persistent=False, steps=0, cancelled=False)
 
     def enable_auto(enabled):
         previous, flags.enabled = flags.enabled, enabled
@@ -598,6 +598,12 @@ def waiting_runtime(gui_runtime, monkeypatch):
     monkeypatch.setattr(auto, "auto_wait", auto_wait, raising=False)
     monkeypatch.setattr(auto, "auto_make_step", auto_make_step, raising=False)
     monkeypatch.setattr(auto, "auto_is_ok", lambda: True, raising=False)
+    monkeypatch.setattr(
+        sys.modules["ida_kernwin"],
+        "user_cancelled",
+        lambda: flags.cancelled,
+        raising=False,
+    )
     monkeypatch.setitem(sys.modules, "ida_idaapi", SimpleNamespace(BADADDR=-1))
     monkeypatch.setitem(
         sys.modules,
@@ -621,12 +627,61 @@ def test_explicit_wait_enables_ongoing_analysis_even_after_completion(
         runtime.analysis_state.mark_complete(initial_status)
     assert runtime.wait_autoanalysis(1) == {"status": "complete", "complete": True}
     assert flags.enabled and flags.persistent
-    assert flags.steps == 3  # Even an already-complete barrier must drain new work.
+
+
+def test_explicit_wait_drains_work_queued_by_finalization(waiting_runtime):
+    runtime, _, auto = waiting_runtime
+    finalized = False
+    pending = []
+
+    def auto_make_step(_start, _end):
+        nonlocal finalized
+        if not finalized:
+            finalized = True
+            runtime.analysis_state.mark_complete()
+            pending.append("finalization work")
+            return False
+        if pending:
+            pending.pop()
+            return True
+        return False
+
+    auto.auto_make_step = auto_make_step
+    auto.auto_is_ok = lambda: not pending
+    assert runtime.wait_autoanalysis(1) == {"status": "complete", "complete": True}
+    assert pending == []
+
+
+@pytest.mark.parametrize(
+    ("code", "status"), [("operation_timeout", 408), ("operation_cancelled", 409)]
+)
+def test_explicit_wait_preserves_interrupt_during_native_cancel_check(
+    waiting_runtime, monkeypatch, code, status
+):
+    runtime, flags, _ = waiting_runtime
+
+    def user_cancelled():
+        # The GUI's native check can process events that interrupt this wait.
+        runtime._interrupt_active(
+            runtime._active_generation,
+            "analysis",
+            APIError(code, "Analysis interrupted", status=status),
+        )
+        return True
+
+    monkeypatch.setattr(sys.modules["ida_kernwin"], "user_cancelled", user_cancelled)
+    with pytest.raises(APIError) as error:
+        runtime.wait_autoanalysis(1)
+    assert (error.value.code, error.value.status) == (code, status)
+    assert (flags.enabled, flags.persistent) == (False, False)
 
 
 @pytest.mark.parametrize("initial_status", ["running", "disabled", "complete"])
 @pytest.mark.parametrize("initial_flags", [(False, False), (False, True), (True, True)])
-@pytest.mark.parametrize("failure", ["cancelled", "exception", "timeout", "interrupt"])
+@pytest.mark.parametrize(
+    "failure",
+    ["cancelled", "cancelled_at_completion", "exception", "timeout", "interrupt"],
+)
 def test_failed_explicit_wait_restores_analysis_settings(
     waiting_runtime, initial_status, initial_flags, failure
 ):
@@ -642,16 +697,18 @@ def test_failed_explicit_wait_restores_analysis_settings(
             raise runtime_module._OperationInterrupt
         if failure == "timeout":
             time.sleep(0.15)
-        return False
+        flags.cancelled = failure in {"cancelled", "cancelled_at_completion"}
+        return failure == "cancelled"
 
     auto.auto_make_step = failed_step
-    auto.auto_is_ok = lambda: False
+    auto.auto_is_ok = lambda: failure == "cancelled_at_completion"
     with pytest.raises(APIError) as error:
         runtime.wait_autoanalysis(0.02 if failure == "timeout" else 1)
     assert (
         error.value.code
         == {
             "cancelled": "analysis_cancelled",
+            "cancelled_at_completion": "analysis_cancelled",
             "exception": "execution_failed",
             "timeout": "operation_timeout",
             "interrupt": "operation_cancelled",

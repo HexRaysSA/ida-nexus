@@ -262,10 +262,15 @@ ability to execute while initial analysis is still running. An explicit
 completion barrier, but also uses `auto_make_step()` rather than native
 `auto_wait()`. It retains one operation generation and deadline for the entire
 drain, checking cancellation cooperatively between steps so cleanup always
-restores the analyzer flags. Cancellation must still wait for the current native
-step to return; unlike background slices, the explicit drain does not release
-operation serialization between steps. The current ida-domain `Database` is
-available globally as `db`, alongside the imported `ida_domain` package. Ordinary
+restores the analyzer flags. A false step result is not sufficient for completion:
+finalization callbacks can queue more work. The drain continues until a step
+returns false and `auto_is_ok()` confirms empty queues on the IDA thread.
+Pending work is not cancellation; operation interrupts and IDA's native
+cancellation flag are checked separately. Cancellation must still wait for the
+current native step to return; unlike background slices, the explicit drain does
+not release operation serialization between steps. The current ida-domain
+`Database` is available globally as `db`, alongside the imported `ida_domain`
+package. Ordinary
 statements execute once, and a single or trailing expression becomes the
 result. As an alternative, code without a trailing
 expression may define `run(db)`, `execute(db)`, or `main(db)` for automatic
