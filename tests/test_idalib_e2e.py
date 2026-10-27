@@ -235,7 +235,7 @@ def await_client(process, ready: Path) -> dict:
 
 
 def test_process_clients_share_one_worker_and_persist_changes(
-    source, open_handle, clients, tmp_path
+    source, open_handle, clients, tmp_path, worker_backend
 ):
     start = tmp_path / "start"
     first, first_ready, first_release = clients(source, start)

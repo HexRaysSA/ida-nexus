@@ -12,7 +12,11 @@ from pathlib import Path
 import pytest
 
 from ida_nexus._http import POST_BODY_LIMIT
-from ida_nexus._registry import InstanceIdentity, load_registry_entry
+from ida_nexus._registry import (
+    InstanceIdentity,
+    InstanceRegistration,
+    load_registry_entry,
+)
 from ida_nexus._runtime import AnalysisState, IdbChangeState
 from ida_nexus._server import NexusHTTPServer
 
@@ -274,6 +278,156 @@ def make_server(tmp_path: Path, *, gui: bool = False):
     )
     server.start()
     return server, backend
+
+
+def hold_lease_watchdog(monkeypatch):
+    entered = threading.Event()
+
+    def held_watchdog(server):
+        entered.set()
+        server._stream_stop.wait(5.0)
+
+    monkeypatch.setattr(NexusHTTPServer, "_watch_leases", held_watchdog)
+    return entered
+
+
+def start_paused_during_publication(monkeypatch, server: NexusHTTPServer):
+    original_publish = InstanceRegistration.publish
+    publishing = threading.Event()
+    resume = threading.Event()
+    errors = []
+
+    def paused_publish(registration, port: int):
+        publishing.set()
+        assert resume.wait(2.0)
+        return original_publish(registration, port)
+
+    def start_server():
+        try:
+            server.start()
+        except (AssertionError, RuntimeError) as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(InstanceRegistration, "publish", paused_publish)
+    thread = threading.Thread(target=start_server, daemon=True)
+    thread.start()
+    assert publishing.wait(2.0)
+    return resume, thread, errors
+
+
+def finish_paused_start(resume, thread, errors):
+    resume.set()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert errors == []
+
+
+def make_managed_server(tmp_path: Path, **kwargs):
+    analysis = AnalysisState()
+    backend = RecordingBackend(analysis)
+    server = NexusHTTPServer(
+        backend,
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", managed=True),
+        analysis,
+        tmp_path,
+        heartbeat_interval=0.02,
+        **kwargs,
+    )
+    return server, backend
+
+
+def test_managed_startup_grace_starts_after_publication(tmp_path: Path, monkeypatch):
+    original_publish = InstanceRegistration.publish
+    watchdog_entered = hold_lease_watchdog(monkeypatch)
+
+    def delayed_publish(registration, port: int):
+        time.sleep(0.5)
+        return original_publish(registration, port)
+
+    monkeypatch.setattr(InstanceRegistration, "publish", delayed_publish)
+    server, _ = make_managed_server(tmp_path, lease_grace=0.2)
+    try:
+        server.start()
+        assert watchdog_entered.wait(1.0)
+        assert server._shutdown_at is not None
+        assert server._shutdown_at > time.monotonic()
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_early_active_lease_keeps_startup_grace_disarmed(tmp_path: Path, monkeypatch):
+    server, _ = make_managed_server(tmp_path, lease_grace=0.2)
+    resume, thread, errors = start_paused_during_publication(monkeypatch, server)
+    try:
+        assert server._lease_opened("early", keepalive=0) is not None
+        finish_paused_start(resume, thread, errors)
+        assert server._shutdown_at is None
+        assert server._active_leases == 1
+    finally:
+        resume.set()
+        thread.join(timeout=2.0)
+        server._lease_closed("early")
+        server.stop()
+        server.release_registration()
+
+
+def test_early_zero_keepalive_release_preserves_immediate_shutdown(
+    tmp_path: Path, monkeypatch
+):
+    watchdog_entered = hold_lease_watchdog(monkeypatch)
+    server, _ = make_managed_server(tmp_path, lease_grace=0.2)
+    resume, thread, errors = start_paused_during_publication(monkeypatch, server)
+    try:
+        assert server._lease_opened("early", keepalive=0) is not None
+        released, shutdown_pending = server._detach_lease("early")
+        assert (released, shutdown_pending) == (True, True)
+        server._finish_lease_close("early")
+        finish_paused_start(resume, thread, errors)
+        assert watchdog_entered.wait(1.0)
+        assert server._shutdown_requested
+        assert server._shutdown_at is not None
+        assert server._shutdown_at <= time.monotonic()
+    finally:
+        resume.set()
+        thread.join(timeout=2.0)
+        server.stop()
+        server.release_registration()
+
+
+def test_early_keepalive_release_preserves_client_deadline(tmp_path: Path, monkeypatch):
+    watchdog_entered = hold_lease_watchdog(monkeypatch)
+    server, _ = make_managed_server(tmp_path, lease_grace=0.2)
+    resume, thread, errors = start_paused_during_publication(monkeypatch, server)
+    try:
+        assert server._lease_opened("early", keepalive=60) is not None
+        released, shutdown_pending = server._detach_lease("early")
+        assert (released, shutdown_pending) == (True, False)
+        server._finish_lease_close("early")
+        finish_paused_start(resume, thread, errors)
+        assert watchdog_entered.wait(1.0)
+        assert server._shutdown_at is not None
+        assert server._shutdown_at - time.monotonic() > 30
+    finally:
+        resume.set()
+        thread.join(timeout=2.0)
+        server.stop()
+        server.release_registration()
+
+
+def test_unleased_managed_worker_still_exits_after_startup_grace(tmp_path: Path):
+    stopped = threading.Event()
+    server, _ = make_managed_server(
+        tmp_path,
+        lease_grace=0.05,
+        on_shutdown=stopped.set,
+    )
+    try:
+        server.start()
+        assert stopped.wait(1.0)
+    finally:
+        server.stop()
+        server.release_registration()
 
 
 def test_server_starts_autoanalysis_once_after_publication(tmp_path: Path):
